@@ -1744,7 +1744,64 @@ which runs the lifecycle through `deploy`, and for each artifact built, uploads 
 
 ## 11. Phase 9: Cutover and Decommissioning
 
-TODO: content
+Every phase so far left the Ant build in place while the Maven build grew next to it. This chapter is where the old build is retired. Cutover is a decision with a checklist behind it, not a date on a calendar: the switch happens when the Maven build has demonstrably reached parity with the Ant build, and the decommissioning itself is mostly documentation and deletion work. Done carelessly, a cutover leaves teams with a stale `build.xml` that half the developers still trust; done deliberately, it removes the ambiguity for good.
+
+### Parallel running
+
+Up through the previous chapters, the rule has been to keep `build.xml` working while `pom.xml` matures. The Ant build remains the authoritative one — the build CI runs, the build the README documents, the build developers invoke — while the Maven build is developed and verified alongside it. The migration lives in a branch or in the same tree with the two builds coexisting; either way, nothing in the team's daily workflow depends on Maven until parity is reached.
+
+Define the switch explicitly rather than by drift:
+
+- Pick one artifact — `acme-core-1.0.0-SNAPSHOT.jar` is the natural candidate — and treat "Maven produces the same artifact with the same tests passing" as the definition of parity, verified by the checklist below.
+- Document which build is authoritative, and where: in the README, in the CI job description, and in the team channel. "Ant is authoritative until cutover" should be written down, because the parallel-running period is exactly when a developer hits a Maven-only bug and is tempted to fall back silently.
+- When the checklist passes, flip the flag in one coordinated change: CI switches from `ant clean test jar` to `mvn -B -ntp verify` (the canonical CI command from Chapter 10), the README's build instructions switch to Maven, and the announcement goes out. After the flag flips, the Ant build becomes the fallback — it should keep working for a short grace period, but fixes go to Maven, not to it.
+- Set a sunset date for the fallback. A fallback with no expiration date is just two builds forever, and two builds is the situation the migration exists to end.
+
+The parallel-running period is not the place to be cautious forever. The longer both builds are maintained, the more effort goes into keeping them in sync and the more a divergence between them goes unnoticed — a test that Ant runs but Maven skips, a resource that one build filters and the other does not. The checklist is how you catch those divergences before the flag flips, which is why it should run continuously in CI during the parallel period, not once by hand.
+
+### Verification checklist
+
+Cutover is justified by evidence, and the evidence is this list. Every item should pass before the authoritative flag flips:
+
+- [ ] The same unit tests pass under both builds: `ant test` and `mvn test` both green on the same source revision
+- [ ] Test count parity: surefire reports the same number of tests run as the Ant JUnit run — a missing test is usually a naming-convention mismatch (`*Test` vs `Test*`) or a test source directory the POM does not pick up
+- [ ] Artifact contents compared: a diff of `unzip -l acme-core-1.0.0-SNAPSHOT.jar` (or `jar tf`) between the Ant-built and Maven-built jars is empty, allowing for differences in the manifest, `META-INF/maven/` metadata, and other Maven-injected packaging metadata
+- [ ] Startup smoke test of the built artifact: the Maven-built jar runs — for a library, at least one consumer resolves it from the local repository and links against it; for an application, it starts and answers a trivial request
+- [ ] CI produces equivalent outputs: the Maven CI job yields the same artifacts, reports, and coverage data the Ant job did, using the CI wiring from Chapter 10
+
+The artifact-content diff deserves emphasis, because it is the item teams skip and later regret. Ant's `jar` task and Maven's `maven-jar-plugin` package the same classes, but the manifests differ (Maven adds `Created-By`, `Built-By`, and the POM coordinates by default) and Maven injects `META-INF/maven/com.acme/acme-core/pom.xml` and `pom.properties` into the archive. Those differences are expected and fine; what is not fine is a missing class, a stale resource, a file the Ant build filtered and Maven does not, or an extra file left behind by an Ant-only step. Read the diff line by line rather than just checking exit codes — every unexpected entry is a migration gap, and it is far cheaper to find it here than in production.
+
+The smoke test is deliberately minimal. Its purpose is not to prove the artifact works — the test suite covers that — but to prove the artifact is *loadable*: the manifest's classpath and main class are correct, the jar is not corrupted, and nothing that lived outside the jar in the Ant build's classpath layout is now missing at runtime. Classpath-related failures are the classic cutover regression, because Ant's flat `lib/` classpath and Maven's resolved dependency graph differ in what they put on the runtime classpath, and only a real launch surfaces the difference.
+
+### Decommissioning
+
+Once the flag has flipped and the fallback's grace period is ending, remove the old build. Decommissioning is four deletions, a documentation sweep, and one announcement:
+
+**Delete the Ant build.** This means `build.xml` itself, the `lib/` directory (its jars now live in the repository manager or the project's file repository, per Chapter 4), and the Ant property files — `build.properties` and any per-environment property files that Chapter 9 migrated to POM properties and profiles. Do not keep "just in case": version control keeps the history, and a copy of the old build in the tree is an invitation for someone to run it and get a different answer than Maven.
+
+**Update the documentation.** The README's build instructions become the Maven commands; developer onboarding docs, wikis, and any build scripts that shell out to `ant` are found and updated. Search the repository for `ant ` invocations and `build.xml` references before declaring the sweep done — IDE configuration files and contribution guides are the usual hiding places. If the docs reference the file-repository stepping stone from Chapter 2 (internal jars consumed via a repository URL), update those notes too, since the stepping stone's purpose ends when `lib/` is gone.
+
+**Update the CI config.** The pipeline should now contain only the Maven invocation — `mvn -B -ntp verify` on every commit, deploy on the main branch, per Chapter 10. Remove any leftover Ant-related steps: `lib/` checkout logic, Ant home setup, archiving of Ant-era output directories, and any job that runs the old build as a canary.
+
+**Announce the cutover once, with the cheat-sheet.** A single team message that the Ant build is gone, the Maven build is authoritative, and the commands developers need day to day are:
+
+- `mvn clean verify` — full build with tests and gates, the "does it work" command
+- `mvn package` — build the jar without the verify gates, for quick local iteration
+- `mvn test` — tests only, the fastest feedback loop
+
+Include in the same message the handful of project-specific equivalents of the old Ant targets (which goal replaced `ant dist`, which replaced the codegen target, and so on), because those one-line mappings are what people will otherwise ask about individually for weeks. The announcement is also the natural place to state where the old build can be found if anyone truly needs it: the last commit before `build.xml` was deleted.
+
+### Keeping `maven-antrun-plugin` or not
+
+Cutover is the deadline for the antrun question. Every `maven-antrun-plugin` execution added during the migration, as the escape hatch from Chapter 7, should be audited before the flag flips: list the executions, and for each one, re-run the strategy ladder from Chapter 7 — is there now a plugin equivalent, or does the task belong in a mojo or behind `exec-maven-plugin`?
+
+The decision per Chapter 7's criteria:
+
+- Wrappers around **side effects the lifecycle has no opinion about** — writing a build-info file, publishing a notification, calling an internal script — can stay. Antrun is a fine permanent home for these, and converting them is optional polish.
+- Wrappers around anything touching the **compile classpath, test execution, or artifact assembly** must not stay: they were marked as pre-cutover debt when they were added, and cutover is when the debt comes due. A wrapped assembly step means the artifact being certified by the checklist above is not the artifact Maven's own plugins produce, and a wrapped test step forfeits surefire's reporting. These convert before cutover or the cutover waits.
+- Wrappers that ran under **deadline pressure** get judged honestly: if the task is low-churn and clearly scoped, keeping the wrapper and tracking it as debt is legitimate; if it is load-bearing in the build proper, it converts.
+
+A useful heuristic for the audit: if deleting an antrun execution would change what lands in `target/classes` or in the packaged artifact, it is build-proper work and needs a native Maven answer before cutover. If deleting it would only remove an external side effect, it can stay indefinitely. Record the outcome of the audit — which wrappers stay, which convert, and why — in the same commit or pull request that flips the authoritative flag, so the state of the escape hatches at cutover is part of the project's history rather than tribal knowledge.
 
 ## 12. Troubleshooting and Common Pitfalls
 
