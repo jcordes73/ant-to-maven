@@ -1207,7 +1207,221 @@ Prefer `exec-maven-plugin` over an antrun block containing `<java>`/`<exec>` whe
 
 ## 8. Phase 6: Multi-Module Builds
 
-TODO: content
+Chapters 3 through 7 migrated a single project: acme-core, one `build.xml`, one `pom.xml`. Real codebases are rarely that flat — a web tier depends on a core library, shared utilities sit in their own module, and the Ant build glues them together with a driver script that invokes each `build.xml` in a hand-maintained order. This chapter replaces that driver script with Maven's reactor and replaces the copy-pasted common configuration with a parent POM. The running example expands to two modules: `acme-core` (the library built in the previous chapters) and `acme-web`, a new module that depends on it.
+
+### The reactor
+
+In Ant, multi-module builds are orchestrated by hand. A driver `build.xml` (or a shell script) invokes each module's `build.xml` in an order someone worked out, and nothing enforces that order except the person who wrote the script. If acme-core's public API changes, the script's author is responsible for knowing that acme-web must be rebuilt afterward.
+
+Maven inverts this. A single POM — the *aggregator* — declares which directories are modules, and the *reactor* (Maven's build coordinator) works out the rest: it reads every module's POM, builds the dependency graph between them, and executes the lifecycle for each module in dependency order. One command, `mvn package`, from the root directory builds acme-core and then acme-web, no matter how many modules there are or how they depend on each other. The ordering that was a script's job is now the reactor's, and it is derived from the same `<dependency>` declarations that Chapter 4 introduced — there is no separate ordering configuration to maintain.
+
+The `<modules>` list lives in the aggregator POM. Each entry is a directory name relative to the aggregator's own directory, and each of those directories contains a `pom.xml` of its own.
+
+### From `subant` to an aggregator POM
+
+Suppose the acme build drives its two modules with a top-level `build.xml` using `<subant>` (or, equivalently, repeated `<ant antfile="..."/>` calls). The Ant side, with the ordering spelled out by hand — core before web, because web needs core's jar:
+
+```xml
+<project name="acme-build" default="dist" basedir=".">
+  <target name="clean">
+    <subant target="clean">
+      <fileset dir="." includes="acme-core/build.xml"/>
+      <fileset dir="." includes="acme-web/build.xml"/>
+    </subant>
+  </target>
+
+  <target name="dist">
+    <subant target="dist" verbose="true">
+      <fileset dir="." includes="acme-core/build.xml"/>
+    </subant>
+    <subant target="dist" verbose="true">
+      <fileset dir="." includes="acme-web/build.xml"/>
+    </subant>
+  </target>
+</project>
+```
+
+Everything about this is manual. The module list is duplicated between the `clean` and `dist` targets (and any other targets the driver has); the ordering — core's `dist` before web's — exists only as the sequence of the two `<subant>` blocks; and a third module means editing the driver in every place the list appears. Add the usual Ant fragility: nothing checks that `acme-web/build.xml` actually exists before the `fileset` silently matches nothing, and each module re-derives its own classpath to the sibling's freshly built jar.
+
+The Maven equivalent is an aggregator POM at the root of the tree — packaging `pom`, meaning it produces no artifact of its own, only a module list:
+
+```xml
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.acme</groupId>
+  <artifactId>acme-parent</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+  <packaging>pom</packaging>
+
+  <modules>
+    <module>acme-core</module>
+    <module>acme-web</module>
+  </modules>
+</project>
+```
+
+The resulting directory tree:
+
+```text
+acme/
+├── pom.xml          (the aggregator above)
+├── acme-core/
+│   └── pom.xml      (the acme-core POM from Chapters 3-7)
+└── acme-web/
+    └── pom.xml
+```
+
+What changed in the translation: the module list appears exactly once, in `<modules>`; the ordering is gone entirely — the reactor derives it from the modules' dependency declarations (shown below); and the driver's targets are gone, because `mvn clean`, `mvn package`, and every other lifecycle goal work across all modules from the root. Adding a third module is one `<module>` entry plus the new directory, not an edit to a script in several places. Note that the `dist` target's job — build each module's distributable — is simply `mvn package`, the same command as the single-module case from Chapter 3.
+
+### Parent POMs: shared configuration
+
+The Ant build shared configuration between modules the same way it shared everything else: property files and copy-paste. A `common.properties` at the root, imported by each module's `build.xml`:
+
+```xml
+<project name="acme-core" default="compile" basedir=".">
+  <property file="../common.properties"/>
+
+  <target name="compile">
+    <javac srcdir="src" destdir="${build.dir}/classes"
+           source="${javac.source}" target="${javac.target}" encoding="UTF-8"/>
+  </target>
+</project>
+```
+
+and the identical block copy-pasted into `acme-web/build.xml`. This covers the simple cases — compiler flags, common paths — but not the harder ones. Each module's `build.xml` still repeats the `<path>` definitions for the shared third-party jars, and when two modules copy the same `<macrodef>` or the same `dist` target, the copies drift: one module gets the encoding fix, the other does not, and nothing detects the divergence.
+
+Maven's answer is the *parent POM*: an aggregator whose `pom` packaging also carries configuration that every child inherits. The aggregator from the previous section extended with the properties from the baseline POM and a `<dependencyManagement>` block pinning the shared third-party versions:
+
+```xml
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.acme</groupId>
+  <artifactId>acme-parent</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+  <packaging>pom</packaging>
+
+  <modules>
+    <module>acme-core</module>
+    <module>acme-web</module>
+  </modules>
+
+  <properties>
+    <maven.compiler.source>11</maven.compiler.source>
+    <maven.compiler.target>11</maven.compiler.target>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.apache.commons</groupId>
+        <artifactId>commons-lang3</artifactId>
+        <version>3.14.0</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.logging.log4j</groupId>
+        <artifactId>log4j-api</artifactId>
+        <version>2.23.1</version>
+      </dependency>
+      <dependency>
+        <groupId>org.junit.jupiter</groupId>
+        <artifactId>junit-jupiter</artifactId>
+        <version>5.10.2</version>
+        <scope>test</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+</project>
+```
+
+Two mechanisms are at work here, and they behave differently. The `<properties>` block is inherited outright: every child compiles with Java 11 and UTF-8 with no configuration of its own — the direct replacement for `common.properties`. `<dependencyManagement>` is different: it does *not* add dependencies to the children. It declares the versions (and scopes) that a dependency will have *if* a child declares it, so each child lists only the groupId and artifactId of what it actually uses, and the version comes from one place. This is the counterpart of the per-module `<path>` definitions: the jar inventory is written once in the parent, and no child can quietly compile against a different `commons-lang3` than its sibling.
+
+A child POM opts in with a `<parent>` element. Here is acme-web, inheriting from acme-parent and depending on its sibling:
+
+```xml
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.acme</groupId>
+    <artifactId>acme-parent</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+  </parent>
+  <artifactId>acme-web</artifactId>
+  <packaging>jar</packaging>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>
+```
+
+Three things the child POM does not contain, deliberately: no groupId or version (both are inherited from the parent, and can be overridden if a module ever needs to diverge), no compiler or encoding properties (inherited), and no version on `junit-jupiter` (supplied by `<dependencyManagement>`). The acme-core POM from the previous chapters converts the same way: it drops its own `<properties>` block and third-party versions, adds the `<parent>` element, and keeps only its `<dependencies>` entries minus their `<version>` tags. The result is the end of the copy-pasted-macrodef problem — the shared configuration exists in exactly one file, and a change to the parent applies to every module on the next build.
+
+### Inter-module dependencies
+
+Inside `acme-web`'s sources, a class that imports `com.acme.Core` needs acme-core's jar on the classpath. In the Ant build, that jar was a filesystem fact: acme-web's `build.xml` pointed a `<path>` at `../acme-core/dist/acme-core-1.0.0.jar` (or at a copy of it), which only existed if the driver script had built core first with the right target.
+
+In Maven, a sibling is just another set of coordinates. acme-web declares the dependency the same way it declared `commons-lang3` in Chapter 4 — by GAV, with the version inherited from the parent via `${project.version}`:
+
+```xml
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.acme</groupId>
+    <artifactId>acme-parent</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+  </parent>
+  <artifactId>acme-web</artifactId>
+  <packaging>jar</packaging>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.acme</groupId>
+      <artifactId>acme-core</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+  </dependencies>
+</project>
+```
+
+The important property of this declaration is what the reactor does with it. When the build runs from the aggregator, Maven sees that acme-web depends on acme-core and resolves acme-core *from the current build* — the classes and jar the reactor just produced — without acme-core ever being installed to the local repository. The `<path>` pointing at `../acme-core/dist/...` is gone, and with it the requirement that someone built core's `dist` target first. (Running `mvn` from *inside* `acme-web/` alone is the exception: with only acme-web's POM in play, the reactor has no acme-core to resolve, so Maven falls back to the local repository and fails if it is not there — which is what the partial builds below are for.)
+
+This also cleans up the dependency's downstream effects. acme-web's war or fat jar picks up acme-core transitively, the same way `commons-lang3` arrives, and a change to acme-core's API surfaces as a compile error in acme-web on the very next `mvn package` — not as a stale-jar mystery at deploy time.
+
+### Build ordering and partial builds
+
+Two commands cover the day-to-day. From the root, `mvn package` builds everything in reactor order — here, acme-core then acme-web, because that is what the dependency graph says. When you are working in one module and do not want to pay for the rest, the `-pl` flag restricts the build to selected modules, and `-am` (also-make) tells the reactor to include everything those modules depend on:
+
+```bash
+mvn -pl acme-web -am package
+```
+
+This builds acme-core and acme-web, in that order, and nothing else — acme-core because acme-web needs it, and only because of that. Without `-am`, `-pl acme-web` builds acme-web alone, which succeeds only if acme-core is already in the local repository. The companion flag `-amd` (also-make-dependents) inverts the selection: `mvn -pl acme-core -amd package` builds acme-core and every module that depends on it. For a two-module tree these distinctions are small; for the fifteen-module build they become, they are the difference between a ninety-second feedback loop and a ten-minute one.
+
+The checklist for this phase:
+
+- [ ] Root aggregator POM with packaging `pom` and one `<module>` entry per directory
+- [ ] The Ant driver script (or shell wrapper with the `<subant>`/`<ant>` calls) deleted
+- [ ] Shared compiler, encoding, and build properties moved to the parent POM's `<properties>`
+- [ ] Shared third-party versions moved to the parent's `<dependencyManagement>`; children declare dependencies without versions
+- [ ] Sibling dependencies declared by coordinates (`com.acme:acme-core`), with no `<path>` pointing at a sibling's `dist/` output
+- [ ] `mvn package` from the root builds all modules in dependency order, and `mvn -pl acme-web -am package` builds the selected module with its dependencies
 
 ## 9. Phase 7: Profiles, Properties, Environments
 
