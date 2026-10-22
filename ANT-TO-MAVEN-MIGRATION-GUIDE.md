@@ -1047,7 +1047,163 @@ Acme-core's dependency from Chapter 4 is `junit-jupiter`, which brings the JUnit
 
 ## 7. Phase 5: Custom Ant Tasks and the Antrun Escape Hatch
 
-TODO: content
+Chapter 5 covered the tasks that account for nearly every line of a typical `build.xml` — compile, jar, resources, tests — and each of those had a direct plugin equivalent. This chapter covers the remainder: the custom `<taskdef>` classes your team wrote, the oddball steps that do not map to any plugin, and the two tools that keep them working inside a Maven build. It replaces the "everything else" row of the core mapping with a concrete decision process.
+
+### The strategy ladder
+
+When your Phase 0 inventory turns up a step with no obvious plugin, work down this list in order. Do not start at the bottom.
+
+1. **Find a plugin equivalent.** Most "custom" tasks replicate something that exists. A task that copies files with a twist is usually `maven-resources-plugin` configuration; a task that generates sources is usually a `maven-generator-plugin` (or `build-helper-maven-plugin` plus an existing generator); a task that checks file sizes or timestamps is often a combination of `maven-enforcer-plugin` rules. Search Central and the Appendix A mapping before assuming a task is unique — writing a wrapper for something a plugin already does is the most common migration mistake.
+2. **Wrap the task with `maven-antrun-plugin`.** If no plugin exists, run the original Ant task from within the lifecycle using antrun. This is acceptable short-term for anything, and acceptable long-term only for genuinely odd steps — the criteria are below.
+3. **Rewrite the task logic as a Maven plugin, or call it via `exec-maven-plugin`.** If the step is going to live in the build permanently, it should eventually stop depending on Ant. That means either a small in-house Maven plugin (a `maven-archiver`-style mojo is a day of work for a simple task) or, for steps that are really just a process invocation, `exec-maven-plugin` with no Ant involved at all.
+
+The ladder is a sequencing tool, not a taxonomy: step 2 buys you a working Maven build now, and steps 1 and 3 are how you pay the wrapper down later.
+
+### Wrapping a custom task: `taskdef` vs `maven-antrun-plugin`
+
+Suppose acme-core's `build.xml` stamps the build with a version file using a custom task:
+
+```xml
+<target name="version-stamp" depends="compile">
+  <taskdef name="version-stamp"
+           classname="com.acme.build.VersionStampTask"
+           classpath="${build.dir}/classes"/>
+  <version-stamp version="1.0.0"
+                 outfile="${build.dir}/classes/version-stamp.properties"/>
+</target>
+```
+
+The task itself is ordinary Ant code — a class extending `org.apache.tools.ant.Task` that writes a properties file — and it lives in the project's sources or a build-tools jar. The `taskdef` puts it on Ant's classpath, and the target invokes it.
+
+The antrun equivalent binds the same invocation to a lifecycle phase. The `maven-antrun-plugin` runs an embedded Ant `target`, and because the custom task's jar is not on Ant's classpath by default, it must be declared in the plugin's own `<dependencies>` block — this is the part most teams miss; a `<taskdef>` without it fails with the familiar `Could not load definitions from resource` error:
+
+```xml
+<build>
+  <plugins>
+    <plugin>
+      <groupId>org.apache.maven.plugins</groupId>
+      <artifactId>maven-antrun-plugin</artifactId>
+      <dependencies>
+        <dependency>
+          <groupId>com.acme</groupId>
+          <artifactId>acme-build-tools</artifactId>
+          <version>1.0.0</version>
+        </dependency>
+      </dependencies>
+      <executions>
+        <execution>
+          <id>version-stamp</id>
+          <phase>process-classes</phase>
+          <goals>
+            <goal>run</goal>
+          </goals>
+          <configuration>
+            <target>
+              <taskdef name="version-stamp"
+                       classname="com.acme.build.VersionStampTask"/>
+              <version-stamp version="${project.version}"
+                             outfile="${project.build.outputDirectory}/version-stamp.properties"/>
+            </target>
+          </configuration>
+        </execution>
+      </executions>
+    </plugin>
+  </plugins>
+</build>
+```
+
+Three things changed in the translation, and all three are improvements the wrapper gives you for free. The hard-coded `1.0.0` became `${project.version}`, so the stamp tracks the POM coordinates instead of drifting from them. `${build.dir}/classes` became `${project.build.outputDirectory}`, tying the output to the lifecycle's convention rather than an Ant property. And the `classpath` on the `taskdef` disappeared — the dependency block resolved `acme-build-tools` through Maven's dependency management, the same mechanism that resolves the project's own dependencies, instead of a hand-built Ant path. Note also the phase choice: `process-classes` runs after compilation, so the stamp lands in `target/classes` and is packaged into the jar by the `package` phase automatically.
+
+### When wrapping is acceptable — and when it is not
+
+Antrun is an escape hatch, not a destination. Whether a given wrapper can stay depends entirely on what the task touches:
+
+**Acceptable to wrap, possibly indefinitely:**
+
+- Clearly-scoped side effects that the lifecycle has no opinion about: writing a build-info file, publishing a notification, updating a changelog, calling an internal deployment script.
+- Steps with low churn: a task that has not changed in three years and is unlikely to need one.
+- Steps under deadline pressure. A working `mvn package` with one antrun block beats a half-finished pure-Maven build; track the wrapper as debt and move on.
+
+**Not acceptable to wrap — these must become native Maven before cutover:**
+
+- Anything touching the **compile classpath**. If the custom task generates sources, weaves aspects, or annotates classes, wrapping it means the antrun block must run in the right phase with the right classpath and ordering relative to `maven-compiler-plugin` — fragile, and invisible to IDEs, which will not see the generated or modified sources. Use an existing generator plugin or write a mojo.
+- Anything touching **test execution**. A custom task that runs tests replaces work surefire and failsafe already do, and wrapping it forfeits surefire's reporting, IDE integration, and parallelism. Chapter 6's migration applies; do not preserve the task.
+- Anything touching **artifact assembly**. A task that builds the jar, war, or distribution archive in a custom way must map to `maven-jar-plugin`, `maven-war-plugin`, `maven-assembly-plugin`, or `maven-shade-plugin` configuration. A wrapped assembly step means `target/` contains artifacts Maven's own plugins did not produce, and every downstream tool — install, deploy, site, CI — is working against the grain.
+
+The dividing line is simple: if the step's output ends up inside `target/classes`, the test run, or the packaged artifact, it is part of the build proper and needs a native Maven answer. If it is an external side effect that happens to run during the build, antrun is a fine permanent home.
+
+### When there is no Ant task at all: `exec-maven-plugin`
+
+Some steps in a legacy `build.xml` are not Ant tasks but raw process invocations. The Ant side, using `<exec>` for a native command or `<java>` for a forked JVM process:
+
+```xml
+<target name="generate-schema">
+  <java classname="com.acme.tools.SchemaGenerator" fork="true">
+    <classpath>
+      <pathelement path="${build.dir}/classes"/>
+      <fileset dir="lib" includes="schema-tools.jar"/>
+    </classpath>
+    <arg value="-out"/>
+    <arg value="${build.dir}/schema"/>
+  </java>
+  <exec executable="gzip">
+    <arg value="${build.dir}/schema/catalog.sql"/>
+  </exec>
+</target>
+```
+
+The `exec-maven-plugin` replaces both patterns, with one goal per kind of invocation: the `java` goal forks a JVM process, the `exec` goal runs a native executable. Configuration mirrors the Ant attributes one-for-one:
+
+```xml
+<build>
+  <plugins>
+    <plugin>
+      <groupId>org.codehaus.mojo</groupId>
+      <artifactId>exec-maven-plugin</artifactId>
+      <executions>
+        <execution>
+          <id>generate-schema</id>
+          <phase>generate-resources</phase>
+          <goals>
+            <goal>java</goal>
+          </goals>
+          <configuration>
+            <mainClass>com.acme.tools.SchemaGenerator</mainClass>
+            <arguments>
+              <argument>-out</argument>
+              <argument>${project.build.directory}/schema</argument>
+            </arguments>
+            <classpathScope>compile</classpathScope>
+          </configuration>
+        </execution>
+        <execution>
+          <id>gzip-schema</id>
+          <phase>generate-resources</phase>
+          <goals>
+            <goal>exec</goal>
+          </goals>
+          <configuration>
+            <executable>gzip</executable>
+            <arguments>
+              <argument>${project.build.directory}/schema/catalog.sql</argument>
+            </arguments>
+          </configuration>
+        </execution>
+      </executions>
+    </plugin>
+  </plugins>
+</build>
+```
+
+Prefer `exec-maven-plugin` over an antrun block containing `<java>`/`<exec>` whenever the step is a plain process invocation — it expresses the intent directly, avoids dragging the Ant object model into the build, and reads the same way to anyone who has never seen a `build.xml`. Its `classpathScope` attribute uses the project's own resolved dependencies rather than a hand-built path, so `schema-tools.jar` should be a declared dependency of acme-core (or of a `acme-build-tools` artifact) instead of a file in `lib/`. Note the phase choice: `generate-resources` runs before compilation, which is right for a generator; a step that must run after packaging binds to `package` or `verify` instead.
+
+### Phase 5 checklist
+
+- [ ] Every custom-task step checked against Appendix A and Central for an existing plugin equivalent
+- [ ] Remaining custom tasks wrapped in `maven-antrun-plugin`, with the task jar declared in the plugin's `<dependencies>` block
+- [ ] Wrapper outputs tracked: file stamps and notifications may stay; compile-classpath, test, and assembly steps have a ticket to become native Maven
+- [ ] Plain process invocations moved to `exec-maven-plugin` `java`/`exec` goals rather than antrun `<exec>`/`<java>`
+- [ ] `mvn package` produces the same artifacts with the same side effects as the old `build.xml` targets
 
 ## 8. Phase 6: Multi-Module Builds
 
