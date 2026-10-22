@@ -438,6 +438,17 @@ This prints the full resolved graph, your direct dependencies at the top level a
 - **Compare it against the `lib/` inventory.** Every jar in `lib/` should either appear in the tree or be accounted for (not needed, or replaced by an API that moved into the JDK). A jar in `lib/` that does not appear in the tree was probably dead weight; a jar the code imports that is missing from the tree is a missing `<dependency>`.
 - **Use it to find coordinates.** For a jar whose filename you know but whose coordinates you do not, search Maven Central (https://central.sonatype.com/) by filename — its search indexes artifacts by name, and a SHA-1 hash of the jar file also works if the filename is opaque. The search result gives you the `groupId`, `artifactId`, and available versions to paste into the `<dependency>` entry.
 
+#### Identifying a mystery jar
+
+The Central filename search covers the common cases. When it does not turn anything up — opaque names like `foo-core-2.3.jar`, jars from defunct projects, or company libraries — these mechanisms identify the jar, roughly in the order to try them:
+
+1. **The jar's own `pom.properties`.** Many jars ship their coordinates: `unzip -p lib/foo.jar 'META-INF/maven/*/pom.properties'` prints the `groupId`, `artifactId`, and `version` directly. This is the most precise method when the metadata is present.
+2. **Manifest inspection.** `unzip -p lib/foo.jar META-INF/MANIFEST.MF` often carries identifying headers: `Implementation-Title` and `Implementation-Version`, or the OSGi `Bundle-SymbolicName` and `Bundle-Version`, which usually map directly to an artifactId and version.
+3. **Checksum search on a repository manager.** Nexus and Artifactory expose search-by-SHA-1 endpoints. For company artifacts that never reached Central, this is the fastest way to confirm the artifact already exists in the company repository under known coordinates.
+4. **Package analysis with `jdeps`.** For a jar whose identity is unknown, `jdeps lib/foo.jar` (or simply listing its package names) shows what the jar provides; searching Central by package name identifies which published artifact owns those classes. This also resolves the reverse problem — two jars in `lib/` that bundle the same classes, which Ant tolerated and Maven will turn into a duplicate-class hazard.
+5. **Coordinate-build services.** For open-source jars that never published to Central but have a public source repository, JitPack can produce coordinates directly from a GitHub or GitLab tag.
+6. **Trial compile as the final check.** Whatever the evidence, confirm it: declare the candidate and run `mvn clean compile`. A wrong identification surfaces immediately as `package org.foo does not exist` compiler errors; a right one disappears into the resolved tree.
+
 ### Version conflicts: what Ant silently tolerated
 
 The `lib/` directory accumulates versions: `commons-lang-2.6.jar` and `commons-lang3-3.14.0.jar` can sit side by side for years, with different code paths picking up whichever one the classloader finds first. Worse, two jars can both bundle (not just depend on) different versions of a third library, and the Ant build never complains — it just behaves differently depending on classpath order, which is exactly the kind of bug that surfaces in production and not in development.
