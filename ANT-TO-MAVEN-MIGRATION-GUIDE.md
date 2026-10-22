@@ -1053,7 +1053,7 @@ Chapter 5 covered the tasks that account for nearly every line of a typical `bui
 
 When your Phase 0 inventory turns up a step with no obvious plugin, work down this list in order. Do not start at the bottom.
 
-1. **Find a plugin equivalent.** Most "custom" tasks replicate something that exists. A task that copies files with a twist is usually `maven-resources-plugin` configuration; a task that generates sources is usually a `maven-generator-plugin` (or `build-helper-maven-plugin` plus an existing generator); a task that checks file sizes or timestamps is often a combination of `maven-enforcer-plugin` rules. Search Central and the Appendix A mapping before assuming a task is unique — writing a wrapper for something a plugin already does is the most common migration mistake.
+1. **Find a plugin equivalent.** Most "custom" tasks replicate something that exists. A task that copies files with a twist is usually `maven-resources-plugin` configuration; a task that generates sources usually has a dedicated Maven plugin (such as `jaxb2-maven-plugin` for JAXB code generation, or `build-helper-maven-plugin` to wire generated sources in); a task that checks file sizes or timestamps is often a combination of `maven-enforcer-plugin` rules. Search Central and the Appendix A mapping before assuming a task is unique — writing a wrapper for something a plugin already does is the most common migration mistake.
 2. **Wrap the task with `maven-antrun-plugin`.** If no plugin exists, run the original Ant task from within the lifecycle using antrun. This is acceptable short-term for anything, and acceptable long-term only for genuinely odd steps — the criteria are below.
 3. **Rewrite the task logic as a Maven plugin, or call it via `exec-maven-plugin`.** If the step is going to live in the build permanently, it should eventually stop depending on Ant. That means either a small in-house Maven plugin (a `maven-archiver`-style mojo is a day of work for a simple task) or, for steps that are really just a process invocation, `exec-maven-plugin` with no Ant involved at all.
 
@@ -1075,7 +1075,7 @@ Suppose acme-core's `build.xml` stamps the build with a version file using a cus
 
 The task itself is ordinary Ant code — a class extending `org.apache.tools.ant.Task` that writes a properties file — and it lives in the project's sources or a build-tools jar. The `taskdef` puts it on Ant's classpath, and the target invokes it.
 
-The antrun equivalent binds the same invocation to a lifecycle phase. The `maven-antrun-plugin` runs an embedded Ant `target`, and because the custom task's jar is not on Ant's classpath by default, it must be declared in the plugin's own `<dependencies>` block — this is the part most teams miss; a `<taskdef>` without it fails with the familiar `Could not load definitions from resource` error:
+The antrun equivalent binds the same invocation to a lifecycle phase. The `maven-antrun-plugin` runs an embedded Ant `target`, and because the custom task's jar is not on Ant's classpath by default, it must be declared in the plugin's own `<dependencies>` block — this is the part most teams miss; without it, the `<taskdef classname="...">` fails with `taskdef class com.acme.build.VersionStampTask cannot be found`:
 
 ```xml
 <build>
@@ -1152,7 +1152,7 @@ Some steps in a legacy `build.xml` are not Ant tasks but raw process invocations
 </target>
 ```
 
-The `exec-maven-plugin` replaces both patterns, with one goal per kind of invocation: the `java` goal forks a JVM process, the `exec` goal runs a native executable. Configuration mirrors the Ant attributes one-for-one:
+The `exec-maven-plugin` replaces both patterns, with one goal per kind of invocation: the `exec` goal runs a native executable, while the `java` goal executes the main class in the Maven JVM — it does not fork. This matters because the Ant `<java fork="true">` above ran in a separate process: if the step relies on forking for isolation (calling `System.exit()`, mutating static state, or needing classloader separation from Maven's own classes), `exec:java` will behave differently. In that case, use the `exec` goal with a `java` executable and the full classpath spelled out via the `<executable>` and `<arguments>` elements, which forks a real JVM. Configuration maps to the Ant attributes closely, but not one-for-one — the forked-JVM option in particular requires re-expressing the classpath and arguments explicitly:
 
 ```xml
 <build>
