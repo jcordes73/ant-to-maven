@@ -10,12 +10,13 @@ A practical, phase-by-phase guide for teams moving Ant-based Java builds to Mave
 - [4. Phase 2: Dependencies](#4-phase-2-dependencies)
 - [5. Phase 3: Map Build Steps to Plugins](#5-phase-3-map-build-steps-to-plugins)
 - [6. Phase 4: Migrate Tests](#6-phase-4-migrate-tests)
-- [7. Phase 5: Custom Ant Tasks and the Antrun Escape Hatch](#7-phase-5-custom-ant-tasks-and-the-antrun-escape-hatch)
-- [8. Phase 6: Multi-Module Builds](#8-phase-6-multi-module-builds)
-- [9. Phase 7: Profiles, Properties, Environments](#9-phase-7-profiles-properties-environments)
-- [10. Phase 8: CI/CD and Release](#10-phase-8-cicd-and-release)
-- [11. Phase 9: Cutover and Decommissioning](#11-phase-9-cutover-and-decommissioning)
-- [12. Troubleshooting and Common Pitfalls](#12-troubleshooting-and-common-pitfalls)
+- [7. Packaging Web Applications (WAR)](#7-packaging-web-applications-war)
+- [8. Phase 5: Custom Ant Tasks and the Antrun Escape Hatch](#8-phase-5-custom-ant-tasks-and-the-antrun-escape-hatch)
+- [9. Phase 6: Multi-Module Builds](#9-phase-6-multi-module-builds)
+- [10. Phase 7: Profiles, Properties, Environments](#10-phase-7-profiles-properties-environments)
+- [11. Phase 8: CI/CD and Release](#11-phase-8-cicd-and-release)
+- [12. Phase 9: Cutover and Decommissioning](#12-phase-9-cutover-and-decommissioning)
+- [13. Troubleshooting and Common Pitfalls](#13-troubleshooting-and-common-pitfalls)
 - [Appendix A: Ant Task to Maven Plugin Mapping](#appendix-a-ant-task-to-maven-plugin-mapping)
 
 ## 1. Introduction
@@ -39,7 +40,7 @@ Migration is not always the right call. Consider staying on Ant, or deferring, w
 - **Legacy code generators are tightly coupled to Ant.** Some older code-generation tools can only be invoked as Ant tasks or depend on Ant's internal APIs and project model. Replacing that coupling can be a project in itself.
 - **The project is near end-of-life.** If a build will be retired soon, the migration cost may never pay for itself.
 
-That said, the window for migration is wider than it first appears. The `maven-antrun-plugin`, covered in Chapter 7, lets you run Ant targets and scripts from within a Maven build, so procedural islands can be carried over incrementally instead of being eliminated up front.
+That said, the window for migration is wider than it first appears. The `maven-antrun-plugin`, covered in Chapter 8, lets you run Ant targets and scripts from within a Maven build, so procedural islands can be carried over incrementally instead of being eliminated up front.
 
 ### Two philosophies: scripting vs. framework
 
@@ -71,7 +72,7 @@ Work through your `build.xml` (and any files it imports or includes) systematica
 
 1. **Every target and its `depends` chain.** List each `<target>` with its `depends` attribute so you can see the true execution order. Ant targets with long dependency chains often hide implicit lifecycle phases — a `dist` target that depends on `compile`, `test`, and `javadoc` is really a package-plus-verify pipeline, and that ordering will map onto Maven's lifecycle later.
 2. **Every `<path>` and `<classpath>` element.** These are your dependency declarations in disguise. For each one, record the jars it pulls in (via `<fileset>`, `<pathelement>`, or a referenced path), because each jar must become a Maven dependency in Chapter 4. Watch for jars that are duplicated across paths, versioned filenames like `commons-lang-2.6.jar`, and jars that exist only locally — those are your dependency-management risks.
-3. **Custom tasks and where their classes come from.** Find every `<taskdef>` and `<typedef>`, and note whether the implementing classes come from a jar on the classpath, from the project's own compiled code, or from a bundled tool. Custom tasks are the single most common migration blocker, so you want the full list early. Chapter 7 covers what to do with them.
+3. **Custom tasks and where their classes come from.** Find every `<taskdef>` and `<typedef>`, and note whether the implementing classes come from a jar on the classpath, from the project's own compiled code, or from a bundled tool. Custom tasks are the single most common migration blocker, so you want the full list early. Chapter 8 covers what to do with them.
 4. **Everything else the build does that is not compilation.** Specifically look for:
    - **Generated-source steps**: `<javacc>`, `<jaxb>`, `<wsimport>`, XDoclet-style generators, or custom code generators invoked via `<java>` or `<exec>`. Maven handles the common ones with plugins, but each needs a dedicated mapping decision.
    - **Copy, filter, and replace steps**: `<copy>` with filtering, `<replace>`, `<replaceregexp>`, and resource staging. These usually map to the resources plugin or build-helper, but only if you know exactly which files move where.
@@ -129,7 +130,7 @@ With the inventory in hand, classify your build against three common blockers:
 
 - **Source layout far from the standard Maven layout** (for example, `src/` containing both main and test code, or sources split across `java/` and `src-java/`). The escape hatch is a build layout override, covered in Chapter 3.
 - **Heavy code generation** — multiple generators, generators tied to Ant's internal APIs, or generated sources feeding further generation. The escape hatch is the build-helper plugin for attaching extra source roots, covered in Chapter 5.
-- **Procedural steps with no plugin equivalent** — arbitrary file surgery, orchestration, or shell logic embedded in targets. The escape hatch is the `maven-antrun-plugin`, which lets you keep those targets as-is while everything else moves to Maven, covered in Chapter 7.
+- **Procedural steps with no plugin equivalent** — arbitrary file surgery, orchestration, or shell logic embedded in targets. The escape hatch is the `maven-antrun-plugin`, which lets you keep those targets as-is while everything else moves to Maven, covered in Chapter 8.
 
 If a blocker dominates the build rather than decorating it, revisit the "When not to migrate" discussion in Chapter 1 before investing further.
 
@@ -139,7 +140,7 @@ Keep the inventory in a short document next to the project (a `MIGRATION-NOTES.m
 
 ## 3. Phase 1: Scaffold the POM
 
-Phase 1 produces the first real Maven artifact: a minimal, buildable `pom.xml` that compiles your sources with the correct Java version and produces the same packaging your Ant build did. It does not yet carry dependencies, tests, or plugin mappings — those arrive in Chapters 4 through 7. The goal here is a baseline so clean that every later chapter is a small, reviewable increment on top of it.
+Phase 1 produces the first real Maven artifact: a minimal, buildable `pom.xml` that compiles your sources with the correct Java version and produces the same packaging your Ant build did. It does not yet carry dependencies, tests, or plugin mappings — those arrive in Chapters 4 through 8. The goal here is a baseline so clean that every later chapter is a small, reviewable increment on top of it.
 
 This chapter uses the acme-core example from Chapter 2: currently an Ant build compiling with `javac source="1.8" target="1.8"` from a `src/` directory. By the end of the chapter, acme-core is a Maven project on Java 11 with a standard layout.
 
@@ -150,7 +151,7 @@ Maven identifies every artifact with three required coordinates plus a packaging
 - **groupId** — the organization or team that owns the artifact, written as a reversed domain name. It exists to keep artifacts from different organizations from colliding, and it typically mirrors your Java package root. For acme-core: `com.acme`.
 - **artifactId** — the name of the artifact within that group. It should match the jar your build already produces and, usually, the project's directory name. For acme-core: `acme-core`.
 - **version** — the version string. Maven has a strong convention that in-development versions end in `-SNAPSHOT` (mutable, rebuilt freely) while release versions do not (immutable, published once). For acme-core: `1.0.0-SNAPSHOT`.
-- **packaging** — the type of artifact the build produces: `jar` (the default), `war`, `pom` (for aggregator parents, covered in Chapter 8), and others. For acme-core: `jar`.
+- **packaging** — the type of artifact the build produces: `jar` (the default), `war`, `pom` (for aggregator parents, covered in Chapter 9), and others. For acme-core: `jar`.
 
 Together, `groupId:artifactId:version` is often abbreviated as GAV. If your Ant build names its output jars by a convention like `<artifactId>-<version>.jar`, the mapping to coordinates is direct: `acme-core-1.0.0.jar` produced by an Ant `dist` target means artifactId `acme-core`, version `1.0.0`, and — if the jar was a development build that was continually rebuilt — `1.0.0-SNAPSHOT` once it is under Maven. If your convention embeds the group, as in a directory tree like `com/acme/acme-core/1.0.0/acme-core-1.0.0.jar`, the groupId falls out of the path: `com.acme`. Pick coordinates that match what the jars are already called wherever possible; renaming artifacts mid-migration is churn you do not need.
 
@@ -259,7 +260,7 @@ The warnings that come with this approach:
 
 - **Every tool that assumes the convention needs the same exception.** IDEs usually pick the override up from the POM, but code coverage agents, formatter plugins, security scanners, and hand-written scripts that walk the tree will not.
 - **Snippets and documentation you copy from the Maven ecosystem assume `src/main/java`.** Every path you read in a plugin example is a path you must mentally translate.
-- **Later chapters inherit the override.** Each plugin introduced in Chapters 5 through 7 gets a little more configuration that exists only to compensate for the layout.
+- **Later chapters inherit the override.** Each plugin introduced in Chapters 5 through 8 gets a little more configuration that exists only to compensate for the layout.
 
 If you take this path, schedule the physical move as an explicit follow-up. The override block is deletable the day the move completes, and deleting it should be its own commit.
 
@@ -556,7 +557,7 @@ A smaller but related conversion: Ant builds pass build behavior in flags (`ant 
 </project>
 ```
 
-The Maven compiler plugin reads `maven.compiler.debug` as a property, so `mvn compile` builds with the default from the POM and `mvn compile -Dmaven.compiler.debug=false` overrides it from the command line — the same convention as `-Dcompile.debug=true`, with the POM supplying the default instead of the script. User-defined properties work the same way: any `<properties>` entry can be overridden with `-D` and referenced as `${name}` in plugin configuration. Chapter 7 revisits this pattern for environment-specific settings, where it becomes the basis for profiles.
+The Maven compiler plugin reads `maven.compiler.debug` as a property, so `mvn compile` builds with the default from the POM and `mvn compile -Dmaven.compiler.debug=false` overrides it from the command line — the same convention as `-Dcompile.debug=true`, with the POM supplying the default instead of the script. User-defined properties work the same way: any `<properties>` entry can be overridden with `-D` and referenced as `${name}` in plugin configuration. Chapter 8 revisits this pattern for environment-specific settings, where it becomes the basis for profiles.
 
 ### Phase 2 checklist
 
@@ -590,9 +591,9 @@ Plugins are what do the work at each phase. A plugin contributes *goals* (indivi
 | `javadoc` | `maven-javadoc-plugin` | Run on demand (`mvn javadoc:javadoc`) or bound to the `verify`/`package` phase for release builds. |
 | `zip`, `tar` | `maven-assembly-plugin` | Bound to `package` with a descriptor. Replaces distribution-archive targets. |
 | fat jar (one-jar style merges) | `maven-shade-plugin` | Bound to `package`. Replaces the unpack-everything-into-one-jar target. |
-| everything else | `maven-antrun-plugin` | The escape hatch: embed any Ant task in the lifecycle. Covered fully in Chapter 7. |
+| everything else | `maven-antrun-plugin` | The escape hatch: embed any Ant task in the lifecycle. Covered fully in Chapter 8. |
 
-Two rows deserve emphasis before the examples. First, `delete` and `mkdir`: in Ant these exist because the build must create and reset its own scratch directories. Maven's standard layout removes the need — `target/` is created on demand and wiped by `mvn clean` — so the correct migration for a `clean` target that deletes `build/` and `dist/` is deletion of the target itself, not a `maven-clean-plugin` configuration. If a `delete` target removes something other than build output (a scratch file, a downloaded artifact), that is a different conversation, and Chapter 7 covers how to keep it. Second, `junit`: Ant's `<junit>` block with its `<batchtest>` is replaced not just by the surefire plugin but by its conventions — test classes named `*Test`, `Test*`, or `*Tests` in `src/test/java` are discovered automatically. Chapter 6 covers the details, including `@RunWith`/`@Nested` edge cases and nonstandard names.
+Two rows deserve emphasis before the examples. First, `delete` and `mkdir`: in Ant these exist because the build must create and reset its own scratch directories. Maven's standard layout removes the need — `target/` is created on demand and wiped by `mvn clean` — so the correct migration for a `clean` target that deletes `build/` and `dist/` is deletion of the target itself, not a `maven-clean-plugin` configuration. If a `delete` target removes something other than build output (a scratch file, a downloaded artifact), that is a different conversation, and Chapter 8 covers how to keep it. Second, `junit`: Ant's `<junit>` block with its `<batchtest>` is replaced not just by the surefire plugin but by its conventions — test classes named `*Test`, `Test*`, or `*Tests` in `src/test/java` are discovered automatically. Chapter 6 covers the details, including `@RunWith`/`@Nested` edge cases and nonstandard names.
 
 ### Compiling: `javac` vs `maven-compiler-plugin`
 
@@ -662,7 +663,7 @@ The equivalent `maven-jar-plugin` configuration. The `archive` element replaces 
 </build>
 ```
 
-Two things to check when translating a `jar` target: whether it used `includes`/`excludes` to split classes across multiple jars (Maven strongly prefers one artifact per module — split with a multi-module build per Chapter 8 rather than per-jar filters), and whether it jars anything other than compiled classes. A jar that bundles `lib/*.jar` inside it is not a plain jar — that is a shaded jar, covered below.
+Two things to check when translating a `jar` target: whether it used `includes`/`excludes` to split classes across multiple jars (Maven strongly prefers one artifact per module — split with a multi-module build per Chapter 9 rather than per-jar filters), and whether it jars anything other than compiled classes. A jar that bundles `lib/*.jar` inside it is not a plain jar — that is a shaded jar, covered below.
 
 ### Resources: `copy` with `filterset` vs `maven-resources-plugin` filtering
 
@@ -868,7 +869,7 @@ The directory you register should live under `target/generated-sources/` — IDE
 
 ### Phase 3 checklist
 
-- [ ] Every target in the Chapter 2 inventory mapped to a row in the table above (or flagged for Chapter 7's Antrun escape hatch)
+- [ ] Every target in the Chapter 2 inventory mapped to a row in the table above (or flagged for Chapter 8's Antrun escape hatch)
 - [ ] Compiler settings left in properties; compiler-plugin configuration only for includes/excludes and processors
 - [ ] `maven-jar-plugin` manifest (if any) translated, with versions pulled from coordinates rather than hard-coded
 - [ ] Filtered resources switched to `@token@` form; binaries excluded from filtering
@@ -1045,7 +1046,277 @@ Acme-core's dependency from Chapter 4 is `junit-jupiter`, which brings the JUnit
 - [ ] JUnit 4 legacy tests (if any) running under the vintage engine, with removal tracked
 - [ ] `mvn verify` runs unit tests, integration tests, and produces both Surefire and JaCoCo reports
 
-## 7. Phase 5: Custom Ant Tasks and the Antrun Escape Hatch
+## 7. Packaging Web Applications (WAR)
+
+If your Ant build produces a web application rather than a library jar, packaging is where the migration pays off most visibly: Maven has first-class WAR support built into the lifecycle, and the hand-assembled `WEB-INF/lib` staging that dominates most Ant web builds disappears entirely. This chapter covers the packaging switch, the war plugin that replaces the Ant `war` task, the container APIs that belong in `provided` scope, and the container and integration-test tooling that replaces Ant's deploy and smoke-test targets. It assumes the single-module story from Chapters 3 through 6; a web tier that depends on a core library becomes a multi-module build, covered in Chapter 9.
+
+### The packaging switch: from `war` target to `war` packaging
+
+In Ant, a WAR is something your build assembles: a `war` target (or a `zip`/`jar` target with a `WEB-INF` layout) that copies compiled classes, dependency jars, and web resources into a staging directory and zips the result. In Maven, a WAR is something your project *is*: the `<packaging>` element switches the lifecycle's default bindings from the jar plugin to the war plugin, and `mvn package` produces a `.war` with no per-target wiring.
+
+A Maven webapp follows the standard layout from Chapter 3 plus one extra directory:
+
+- **`src/main/java`** and **`src/main/resources`** — unchanged. Servlet classes, filters, listeners, and their classpath resources come from exactly the same places they did for acme-core's jar, and land in `WEB-INF/classes` in the archive.
+- **`src/main/webapp`** — the web resources: JSPs, static assets, and `WEB-INF/web.xml`. Everything in this directory is copied into the root of the WAR as-is; it is the counterpart of the `docroot/`, `web/`, or `WebContent/` directory the Ant build staged from.
+- **`target/`** — where `mvn package` produces `target/<finalName>.war`, named from the coordinates the same way a jar is.
+
+The populated layout for a web module:
+
+```text
+acme-web/
+├── pom.xml
+└── src/
+    ├── main/
+    │   ├── java/
+    │   │   └── com/
+    │   │       └── acme/
+    │   │           └── web/
+    │   │               └── AcmeServlet.java
+    │   ├── resources/
+    │   │   └── messages.properties
+    │   └── webapp/
+    │       ├── WEB-INF/
+    │       │   └── web.xml
+    │       ├── index.jsp
+    │       └── css/
+    │           └── acme.css
+    └── test/
+        └── java/
+            └── com/
+                └── acme/
+                    └── web/
+                        └── AcmeServletTest.java
+```
+
+The packaging declaration is one element on the acme-web POM (acme-core from the previous chapters stays a jar; this is the web-tier module that depends on it):
+
+```xml
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.acme</groupId>
+  <artifactId>acme-web</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+  <packaging>war</packaging>
+</project>
+```
+
+With `<packaging>war</packaging>`, `mvn package` compiles `src/main/java`, copies `src/main/resources` into `WEB-INF/classes`, copies `src/main/webapp` into the archive root, and produces `target/acme-web-1.0.0-SNAPSHOT.war`. No staging directory, no copy targets, and no `war` task.
+
+### The `war` task vs `maven-war-plugin`
+
+A typical Ant `war` task assembles the archive piece by piece — compiled classes here, dependency jars there, web resources somewhere else:
+
+```xml
+<target name="war" depends="compile, resolve-libs">
+  <mkdir dir="${build.dir}/webapp/WEB-INF"/>
+  <war destfile="dist/acme-web-1.0.0.war"
+       webxml="config/web.xml">
+    <fileset dir="${build.dir}/webapp"/>
+    <lib dir="${lib.dir}">
+      <include name="*.jar"/>
+      <exclude name="servlet-api*.jar"/>
+    </lib>
+    <classes dir="${build.dir}/classes"/>
+    <webres dir="src/webres"/>
+  </war>
+</target>
+```
+
+Note what this target does by hand: assemble `WEB-INF/lib` from a `lib/` sweep (explicitly excluding the servlet API jar so it does not leak into the archive), copy compiled classes into `WEB-INF/classes`, and stage web resources from a nonstandard source directory. The Maven equivalent — with the standard layout — is the `maven-war-plugin`, which is bound to the `package` phase by the `war` packaging itself and needs no declaration at all for a conventional layout:
+
+```xml
+<build>
+  <plugins>
+    <plugin>
+      <groupId>org.apache.maven.plugins</groupId>
+      <artifactId>maven-war-plugin</artifactId>
+      <configuration>
+        <warSourceDirectory>src/main/webapp</warSourceDirectory>
+        <webXml>src/main/webapp/WEB-INF/web.xml</webXml>
+      </configuration>
+    </plugin>
+  </plugins>
+</build>
+```
+
+The mapping from the Ant task, item by item:
+
+| Ant `war` construct | `maven-war-plugin` equivalent |
+| --- | --- |
+| `<classes dir="${build.dir}/classes"/>` | `src/main/java` compiled and placed in `WEB-INF/classes` automatically |
+| `<lib dir="${lib.dir}">` | the POM's `<dependencies>`, copied into `WEB-INF/lib` by scope (`compile` and `runtime`) |
+| `<exclude name="servlet-api*.jar"/>` in `<lib>` | unnecessary — `provided`-scoped dependencies never enter the archive |
+| `<fileset dir="${build.dir}/webapp"/>` | `warSourceDirectory`, defaulting to `src/main/webapp` |
+| `webxml="config/web.xml"` | `<webXml>`, defaulting to `src/main/webapp/WEB-INF/web.xml` |
+| `<webres dir="src/webres"/>` | files in `src/main/webapp` land at the archive root, no separate source |
+
+The `warSourceDirectory` and `webXml` overrides are the escape hatch for legacy layouts, following the same pattern as the compiler and resources overrides in Chapter 3: point the plugin at where the old build kept its web sources, schedule the physical move into `src/main/webapp` as a follow-up, and delete the overrides when the move completes. For a project already on the standard layout, the entire `<plugin>` block above is redundant and should be removed — the defaults are the configuration.
+
+One feature with no Ant counterpart is the overlay. An `<overlay>` merges another WAR — typically a dependency, such as a framework's prebuilt web fragment or your own base WAR — into the archive as it is assembled, with the current project's files taking precedence over the overlaid ones:
+
+```xml
+<build>
+  <plugins>
+    <plugin>
+      <groupId>org.apache.maven.plugins</groupId>
+      <artifactId>maven-war-plugin</artifactId>
+      <configuration>
+        <overlays>
+          <overlay>
+            <groupId>com.acme</groupId>
+            <artifactId>acme-web-base</artifactId>
+          </overlay>
+        </overlays>
+      </configuration>
+    </plugin>
+  </plugins>
+</build>
+```
+
+Ant builds that needed this did it with manual `unzip`-and-recopy sequences that lost files on collisions; the plugin merges deterministically and reports conflicts. It is an advanced feature — skip it unless your build actually merges WARs — but it is the answer when you find that pattern in an old build file.
+
+### JEE APIs: bundling vs `provided` scope
+
+The most common and most damaging pattern in Ant web builds is bundling the container's own jars into the WAR. The Ant path looked like this:
+
+```xml
+<path id="web.classpath">
+  <pathelement path="${build.dir}/classes"/>
+  <fileset dir="${lib.dir}">
+    <include name="*.jar"/>
+  </fileset>
+  <fileset dir="${j2ee.jar.dir}">
+    <include name="servlet-api.jar"/>
+    <include name="jsp-api.jar"/>
+  </fileset>
+</path>
+
+<target name="war" depends="compile">
+  <war destfile="dist/acme-web-1.0.0.war" webxml="config/web.xml">
+    <classes dir="${build.dir}/classes"/>
+    <lib dir="${lib.dir}"/>
+  </war>
+</target>
+```
+
+The servlet API jars are on the compile classpath (necessary — the code imports `javax.servlet.http.HttpServlet`), but nothing keeps them out of the archive, so `WEB-INF/lib` ships with a second copy of the servlet API. The servlet container supplies its own implementation of those APIs through the web application classloader hierarchy, and a bundled copy produces exactly the classloader conflicts the container spec exists to prevent: `ClassCastException`s on `HttpServletRequest`, `ClassCastException`-adjacent `LinkageError`s, or an application that works on one container version and fails on the next, depending on which copy of the class the classloader finds first.
+
+Maven's answer is `provided` scope, from the scope table in Chapter 4: the dependency is on the compile and test classpaths but is *not* packaged into the archive, because the runtime environment — here, the servlet container — supplies it:
+
+```xml
+<dependencies>
+  <dependency>
+    <groupId>jakarta.servlet</groupId>
+    <artifactId>jakarta.servlet-api</artifactId>
+    <version>6.1.0</version>
+    <scope>provided</scope>
+  </dependency>
+  <dependency>
+    <groupId>jakarta.enterprise</groupId>
+    <artifactId>jakarta.enterprise.cdi-api</artifactId>
+    <version>4.1.0</version>
+    <scope>provided</scope>
+  </dependency>
+</dependencies>
+```
+
+The example above is framed for Jakarta EE 11, where the APIs use the `jakarta.*` namespace; if your target container is a Java EE 8 server, the equivalent coordinates are `javax.servlet:javax.servlet-api:4.0.1` with the `javax.*` namespace. The namespace distinction is not cosmetic: the two are different artifacts with incompatible package names, and you must match whichever one your container implements — migrating `javax`-namespace code to a Jakarta container is a code change (import rewrites), not a dependency swap.
+
+The principle is the one the Ant build violated by accident: the container supplies the JEE APIs, so your build compiles against them but ships without them. Declare the API with `<scope>provided</scope>`, and `mvn package` produces a `WEB-INF/lib` containing only what your application actually brings — with no exclusion lists to maintain and no way for the servlet jar to sneak back into the archive when someone adds it to `lib/`. This is also the honest correction of the `servlet-api*.jar` exclude in the previous section's Ant task: in Ant, keeping the container jar out of the WAR was a manual, per-target chore; in Maven it is a property of the scope.
+
+### Container deployment: the Cargo plugin
+
+In the Ant build, "deploy" usually meant a target that copied the WAR into a running container's deployment directory, plus another target to start and stop that container — often shell-scripted around `<exec>`. In Maven, that work belongs to the Cargo plugin, `org.codehaus.cargo:cargo-maven3-plugin`, which downloads, starts, stops, and deploys to containers (Tomcat, Jetty, WildFly, and others) from the build:
+
+```xml
+<build>
+  <plugins>
+    <plugin>
+      <groupId>org.codehaus.cargo</groupId>
+      <artifactId>cargo-maven3-plugin</artifactId>
+      <configuration>
+        <container>
+          <containerId>tomcat10x</containerId>
+        </container>
+        <configuration>
+          <type>standalone</type>
+          <properties>
+            <cargo.servlet.port>8080</cargo.servlet.port>
+          </properties>
+        </configuration>
+        <deployables>
+          <deployable>
+            <groupId>com.acme</groupId>
+            <artifactId>acme-web</artifactId>
+          </deployable>
+        </deployables>
+      </configuration>
+    </plugin>
+  </plugins>
+</build>
+```
+
+Cargo's goals run on demand — `mvn cargo:start` to start a container with the WAR deployed, `mvn cargo:run` to keep it running, `mvn cargo:stop` to stop it — or bind to the pre-integration-test and post-integration-test phases so a container lifecycle wraps the integration tests. A word of disambiguation that matters in this guide: `mvn deploy` (Chapter 11) publishes an artifact to a repository manager, which is distribution, not deployment; the Cargo plugin's deploy puts a WAR into a running servlet container, which is what the Ant deploy target actually did. The two are unrelated despite sharing a verb — this chapter's deploy is the container one.
+
+Cargo is generic and container-agnostic, which makes it the right default for CI smoke tests. Container-native plugins exist when your target server has its own tooling: `org.wildfly.plugins:wildfly-maven-plugin` for WildFly and JBoss EAP (goals like `wildfly:deploy` against a running or managed server) and `org.glassfish.embedded:maven-embedded-glassfish-plugin` for an embedded GlassFish instance. They configure faster and speak the server's own deployment semantics, at the cost of tying the build to one container; prefer Cargo when the build should stay portable, and a native plugin when you specifically need the target server's behavior.
+
+### Integration tests with Arquillian
+
+The final piece: tests that exercise code inside a real container. The Ant pattern was a hand-wired test target — start the container, deploy the WAR, run the JUnit suite against it, tear it down:
+
+```xml
+<target name="container-test" depends="war">
+  <exec executable="${catalina.home}/bin/startup.sh"/>
+  <waitfor maxwait="30" maxwaitunit="second">
+    <http url="http://localhost:8080/acme-web/health"/>
+  </waitfor>
+  <junit printsummary="yes" haltonfailure="yes">
+    <classpath>
+      <pathelement path="${build.dir}/test-classes"/>
+      <fileset dir="${lib.dir}/test" includes="*.jar"/>
+    </classpath>
+    <batchtest todir="${build.dir}/itest-reports">
+      <fileset dir="${test.dir}" includes="**/*IT.java"/>
+    </batchtest>
+  </junit>
+  <exec executable="${catalina.home}/bin/shutdown.sh"/>
+</target>
+```
+
+Every part of this — the lifecycle scripting, the readiness poll, the classpath assembly, the report wiring — is what Arquillian automates. Arquillian takes over the container lifecycle around each test *deployment*: the test class declares what to deploy (`@Deployment` returning a shrinkwrap archive), Arquillian packages and deploys it into the container, runs the test cases inside that deployment, and reports results through JUnit. The dependencies are test-scoped — the Arquillian JUnit 5 integration plus a container adapter matching your target server:
+
+```xml
+<dependencies>
+  <dependency>
+    <groupId>org.jboss.arquillian.junit5</groupId>
+    <artifactId>arquillian-junit5-container</artifactId>
+    <version>1.9.3.Final</version>
+    <scope>test</scope>
+  </dependency>
+  <dependency>
+    <groupId>org.jboss.arquillian.container</groupId>
+    <artifactId>arquillian-tomcat-managed-10</artifactId>
+    <version>1.2.0.Alpha1</version>
+    <scope>test</scope>
+  </dependency>
+</dependencies>
+```
+
+Arquillian tests are named and discovered like any other integration test, so they run under the Failsafe plugin from Chapter 6 — the same `integration-test`/`verify` goal pair, the same `*IT` naming conventions, the same `target/failsafe-reports/` output. If the chapter's Cargo configuration is bound to the pre-integration-test and post-integration-test phases, Failsafe runs the Arquillian tests against that container; if the container adapter manages its own (as the managed Tomcat adapter does), no Cargo configuration is needed for the test run at all. Either way, the `container-test` target and its shell-scripted container choreography are deleted, and `mvn verify` runs the whole pipeline: unit tests, integration tests, container tests, and the coverage report from Chapter 6.
+
+The checklist for this chapter:
+
+- [ ] `<packaging>war</packaging>` set on the web module, and `mvn package` produces `target/<finalName>.war`
+- [ ] Web resources moved to `src/main/webapp` (with `WEB-INF/web.xml`), or `warSourceDirectory`/`webXml` overrides in place with a dated follow-up to move them
+- [ ] Ant `war` task's `lib`/`classes`/`webres` assembly replaced by the POM's dependencies and the standard layout; the plugin declared only where defaults are overridden
+- [ ] All container-supplied APIs (servlet, CDI, JSF, JSP) declared with `<scope>provided</scope>`; no JEE jar in `WEB-INF/lib` of the built WAR
+- [ ] Ant deploy/start/stop targets replaced by the Cargo plugin (or a container-native plugin), with the repository `mvn deploy` from Chapter 11 kept distinct
+- [ ] Container tests running as Arquillian deployments under the Failsafe plugin, and the shell-scripted `container-test` target deleted
+
+## 8. Phase 5: Custom Ant Tasks and the Antrun Escape Hatch
 
 Chapter 5 covered the tasks that account for nearly every line of a typical `build.xml` — compile, jar, resources, tests — and each of those had a direct plugin equivalent. This chapter covers the remainder: the custom `<taskdef>` classes your team wrote, the oddball steps that do not map to any plugin, and the two tools that keep them working inside a Maven build. It replaces the "everything else" row of the core mapping with a concrete decision process.
 
@@ -1205,7 +1476,7 @@ Prefer `exec-maven-plugin` over an antrun block containing `<java>`/`<exec>` whe
 - [ ] Plain process invocations moved to `exec-maven-plugin` `java`/`exec` goals rather than antrun `<exec>`/`<java>`
 - [ ] `mvn package` produces the same artifacts with the same side effects as the old `build.xml` targets
 
-## 8. Phase 6: Multi-Module Builds
+## 9. Phase 6: Multi-Module Builds
 
 Chapters 3 through 7 migrated a single project: acme-core, one `build.xml`, one `pom.xml`. Real codebases are rarely that flat — a web tier depends on a core library, shared utilities sit in their own module, and the Ant build glues them together with a driver script that invokes each `build.xml` in a hand-maintained order. This chapter replaces that driver script with Maven's reactor and replaces the copy-pasted common configuration with a parent POM. The running example expands to two modules: `acme-core` (the library built in the previous chapters) and `acme-web`, a new module that depends on it.
 
@@ -1269,7 +1540,7 @@ The resulting directory tree:
 acme/
 ├── pom.xml          (the aggregator above)
 ├── acme-core/
-│   └── pom.xml      (the acme-core POM from Chapters 3-7)
+│   └── pom.xml      (the acme-core POM from Chapters 3-8)
 └── acme-web/
     └── pom.xml
 ```
@@ -1423,7 +1694,7 @@ The checklist for this phase:
 - [ ] Sibling dependencies declared by coordinates (`com.acme:acme-core`), with no `<path>` pointing at a sibling's `dist/` output
 - [ ] `mvn package` from the root builds all modules in dependency order, and `mvn -pl acme-web -am package` builds the selected module with its dependencies
 
-## 9. Phase 7: Profiles, Properties, Environments
+## 10. Phase 7: Profiles, Properties, Environments
 
 Phase 6 moved the shared build properties into the parent POM's `<properties>`. This chapter covers the rest of Ant's property machinery — property files, command-line overrides, and the built-in values you were defining by hand — and the pattern they most often feed: environment-specific builds, selected in Ant by passing `-Denv=dev` or `-Denv=prod` and in Maven by profiles.
 
@@ -1437,7 +1708,7 @@ The Ant pattern — properties loaded from an external file:
 </project>
 ```
 
-The Maven equivalent is the `<properties>` section of the POM, which you have already been using since Chapter 8's parent POM for shared compiler and encoding settings:
+The Maven equivalent is the `<properties>` section of the POM, which you have already been using since Chapter 9's parent POM for shared compiler and encoding settings:
 
 ```xml
 <project>
@@ -1563,7 +1834,7 @@ Profiles solve build-time variation, and environment configuration is usually no
 - [ ] `mvn package` and `mvn -P prod package` produce the dev and prod configurations respectively, verified with `mvn help:active-profiles`
 - [ ] Nothing deploy-specific (URLs, credentials, endpoints) is baked into artifacts by a profile; runtime configuration is externalized
 
-## 10. Phase 8: CI/CD and Release
+## 11. Phase 8: CI/CD and Release
 
 The previous phases moved the build itself to Maven. This chapter moves what surrounds it: the CI pipeline, the versioning discipline the build enforces, the release process, and the deploy step that publishes artifacts to a repository. The pattern is the same as every earlier phase — replace the bespoke Ant invocation with the standard Maven one, and let the framework supply what the script used to define by hand.
 
@@ -1607,7 +1878,7 @@ Maven enforces the distinction the Ant build left implicit. A version is either 
 - A SNAPSHOT is a mutable version. Maven stores it in the local repository under the base version, and a repository manager stores the dated snapshots behind it. When acme-web declares a dependency on `acme-core:1.0.0-SNAPSHOT`, Maven checks the remote repository for a newer snapshot (subject to update policies) and re-resolves when one appears. A SNAPSHOT says: this is in flux, re-download me.
 - A release is immutable, by convention and by configuration. Once `acme-core:1.0.0` is published to a repository, that repository will refuse a second deploy of the same coordinates — the repository manager's non-redeploy policy, which exists precisely to make `1.0.0` mean one binary forever. A release says: this is frozen; if anything changes, the version changes.
 
-That immutability is what turns artifacts into something you can promote. Chapter 9's one-build-fits-all-artifact principle — build once, promote the same binary through every environment — only works if a version identifies exactly one artifact, and only the SNAPSHOT/release split plus non-redeploy gives you that. Ant could be disciplined about this, but nothing in Ant enforced it; in Maven, a redeploy of a release fails, and `1.0.0-SNAPSHOT` failing to update is a signal that something upstream did not deploy.
+That immutability is what turns artifacts into something you can promote. Chapter 10's one-build-fits-all-artifact principle — build once, promote the same binary through every environment — only works if a version identifies exactly one artifact, and only the SNAPSHOT/release split plus non-redeploy gives you that. Ant could be disciplined about this, but nothing in Ant enforced it; in Maven, a redeploy of a release fails, and `1.0.0-SNAPSHOT` failing to update is a signal that something upstream did not deploy.
 
 The working rules that fall out of this:
 
@@ -1662,7 +1933,7 @@ mvn versions:commit
 </project>
 ```
 
-Two settings matter most. `tagNameFormat` controls the tag name — `@{project.version}` is substituted with the release version, giving tags like `v1.0.0` that match whatever scheme your team used in Ant. `releaseProfiles` names profiles (from Chapter 9) activated only during the release build — the usual home for javadoc and source-jar generation that you do not want on every developer build. Running the release is then two commands:
+Two settings matter most. `tagNameFormat` controls the tag name — `@{project.version}` is substituted with the release version, giving tags like `v1.0.0` that match whatever scheme your team used in Ant. `releaseProfiles` names profiles (from Chapter 10) activated only during the release build — the usual home for javadoc and source-jar generation that you do not want on every developer build. Running the release is then two commands:
 
 ```bash
 mvn release:prepare
@@ -1722,7 +1993,7 @@ The credentials are not in the POM. They live in `settings.xml`, matched by the 
 </settings>
 ```
 
-This is the `settings.xml` usage from Chapter 9 in its most important role: per-machine secrets stay out of the versioned POM, and the CI machine's `settings.xml` (or its equivalent, injected by the CI system) carries the deploy credentials. The `<id>` is the join key — it must match `<distributionManagement>` exactly, and a mismatch surfaces as a 401 on deploy, not a configuration error at parse time.
+This is the `settings.xml` usage from Chapter 10 in its most important role: per-machine secrets stay out of the versioned POM, and the CI machine's `settings.xml` (or its equivalent, injected by the CI system) carries the deploy credentials. The `<id>` is the join key — it must match `<distributionManagement>` exactly, and a mismatch surfaces as a 401 on deploy, not a configuration error at parse time.
 
 Publishing acme-core is then:
 
@@ -1742,7 +2013,7 @@ which runs the lifecycle through `deploy`, and for each artifact built, uploads 
 - [ ] `<distributionManagement>` in the parent POM with separate release and snapshot repositories, ids matching `<server>` entries in `settings.xml`
 - [ ] Deploy credentials in `settings.xml` only (injected into CI, never in the POM or version control); `mvn -B -ntp deploy` publishes snapshots on the main branch and releases via the release plugin
 
-## 11. Phase 9: Cutover and Decommissioning
+## 12. Phase 9: Cutover and Decommissioning
 
 Every phase so far left the Ant build in place while the Maven build grew next to it. This chapter is where the old build is retired. Cutover is a decision with a checklist behind it, not a date on a calendar: the switch happens when the Maven build has demonstrably reached parity with the Ant build, and the decommissioning itself is mostly documentation and deletion work. Done carelessly, a cutover leaves teams with a stale `build.xml` that half the developers still trust; done deliberately, it removes the ambiguity for good.
 
@@ -1754,7 +2025,7 @@ Define the switch explicitly rather than by drift:
 
 - Pick one artifact — `acme-core-1.0.0-SNAPSHOT.jar` is the natural candidate — and treat "Maven produces the same artifact with the same tests passing" as the definition of parity, verified by the checklist below.
 - Document which build is authoritative, and where: in the README, in the CI job description, and in the team channel. "Ant is authoritative until cutover" should be written down, because the parallel-running period is exactly when a developer hits a Maven-only bug and is tempted to fall back silently.
-- When the checklist passes, flip the flag in one coordinated change: CI switches from `ant clean test jar` to `mvn -B -ntp verify` (the canonical CI command from Chapter 10), the README's build instructions switch to Maven, and the announcement goes out. After the flag flips, the Ant build becomes the fallback — it should keep working for a short grace period, but fixes go to Maven, not to it.
+- When the checklist passes, flip the flag in one coordinated change: CI switches from `ant clean test jar` to `mvn -B -ntp verify` (the canonical CI command from Chapter 11), the README's build instructions switch to Maven, and the announcement goes out. After the flag flips, the Ant build becomes the fallback — it should keep working for a short grace period, but fixes go to Maven, not to it.
 - Set a sunset date for the fallback. A fallback with no expiration date is just two builds forever, and two builds is the situation the migration exists to end.
 
 The parallel-running period is not the place to be cautious forever. The longer both builds are maintained, the more effort goes into keeping them in sync and the more a divergence between them goes unnoticed — a test that Ant runs but Maven skips, a resource that one build filters and the other does not. The checklist is how you catch those divergences before the flag flips, which is why it should run continuously in CI during the parallel period, not once by hand.
@@ -1767,7 +2038,7 @@ Cutover is justified by evidence, and the evidence is this list. Every item shou
 - [ ] Test count parity: surefire reports the same number of tests run as the Ant JUnit run — a missing test is usually a naming-convention mismatch (`*Test` vs `Test*`) or a test source directory the POM does not pick up
 - [ ] Artifact contents compared: a diff of `unzip -l acme-core-1.0.0-SNAPSHOT.jar` (or `jar tf`) between the Ant-built and Maven-built jars is empty, allowing for differences in the manifest, `META-INF/maven/` metadata, and other Maven-injected packaging metadata
 - [ ] Startup smoke test of the built artifact: the Maven-built jar runs — for a library, at least one consumer resolves it from the local repository and links against it; for an application, it starts and answers a trivial request
-- [ ] CI produces equivalent outputs: the Maven CI job yields the same artifacts, reports, and coverage data the Ant job did, using the CI wiring from Chapter 10
+- [ ] CI produces equivalent outputs: the Maven CI job yields the same artifacts, reports, and coverage data the Ant job did, using the CI wiring from Chapter 11
 
 The artifact-content diff deserves emphasis, because it is the item teams skip and later regret. Ant's `jar` task and Maven's `maven-jar-plugin` package the same classes, but the manifests differ (Maven adds `Created-By`, `Built-By`, and the POM coordinates by default) and Maven injects `META-INF/maven/com.acme/acme-core/pom.xml` and `pom.properties` into the archive. Those differences are expected and fine; what is not fine is a missing class, a stale resource, a file the Ant build filtered and Maven does not, or an extra file left behind by an Ant-only step. Read the diff line by line rather than just checking exit codes — every unexpected entry is a migration gap, and it is far cheaper to find it here than in production.
 
@@ -1777,11 +2048,11 @@ The smoke test is deliberately minimal. Its purpose is not to prove the artifact
 
 Once the flag has flipped and the fallback's grace period is ending, remove the old build. Decommissioning is four deletions, a documentation sweep, and one announcement:
 
-**Delete the Ant build.** This means `build.xml` itself, the `lib/` directory (its jars now live in the repository manager or the project's file repository, per Chapter 4), and the Ant property files — `build.properties` and any per-environment property files that Chapter 9 migrated to POM properties and profiles. Do not keep "just in case": version control keeps the history, and a copy of the old build in the tree is an invitation for someone to run it and get a different answer than Maven.
+**Delete the Ant build.** This means `build.xml` itself, the `lib/` directory (its jars now live in the repository manager or the project's file repository, per Chapter 4), and the Ant property files — `build.properties` and any per-environment property files that Chapter 10 migrated to POM properties and profiles. Do not keep "just in case": version control keeps the history, and a copy of the old build in the tree is an invitation for someone to run it and get a different answer than Maven.
 
 **Update the documentation.** The README's build instructions become the Maven commands; developer onboarding docs, wikis, and any build scripts that shell out to `ant` are found and updated. Search the repository for `ant ` invocations and `build.xml` references before declaring the sweep done — IDE configuration files and contribution guides are the usual hiding places. If the docs reference the file-repository stepping stone from Chapter 4 (internal jars consumed via a repository URL), update those notes too, since the stepping stone's purpose ends when `lib/` is gone.
 
-**Update the CI config.** The pipeline should now contain only the Maven invocation — `mvn -B -ntp verify` on every commit, deploy on the main branch, per Chapter 10. Remove any leftover Ant-related steps: `lib/` checkout logic, Ant home setup, archiving of Ant-era output directories, and any job that runs the old build as a canary.
+**Update the CI config.** The pipeline should now contain only the Maven invocation — `mvn -B -ntp verify` on every commit, deploy on the main branch, per Chapter 11. Remove any leftover Ant-related steps: `lib/` checkout logic, Ant home setup, archiving of Ant-era output directories, and any job that runs the old build as a canary.
 
 **Announce the cutover once, with the cheat-sheet.** A single team message that the Ant build is gone, the Maven build is authoritative, and the commands developers need day to day are:
 
@@ -1793,9 +2064,9 @@ Include in the same message the handful of project-specific equivalents of the o
 
 ### Keeping `maven-antrun-plugin` or not
 
-Cutover is the deadline for the antrun question. Every `maven-antrun-plugin` execution added during the migration, as the escape hatch from Chapter 7, should be audited before the flag flips: list the executions, and for each one, re-run the strategy ladder from Chapter 7 — is there now a plugin equivalent, or does the task belong in a mojo or behind `exec-maven-plugin`?
+Cutover is the deadline for the antrun question. Every `maven-antrun-plugin` execution added during the migration, as the escape hatch from Chapter 8, should be audited before the flag flips: list the executions, and for each one, re-run the strategy ladder from Chapter 8 — is there now a plugin equivalent, or does the task belong in a mojo or behind `exec-maven-plugin`?
 
-The decision per Chapter 7's criteria:
+The decision per Chapter 8's criteria:
 
 - Wrappers around **side effects the lifecycle has no opinion about** — writing a build-info file, publishing a notification, calling an internal script — can stay. Antrun is a fine permanent home for these, and converting them is optional polish.
 - Wrappers around anything touching the **compile classpath, test execution, or artifact assembly** must not stay: they were marked as pre-cutover debt when they were added, and cutover is when the debt comes due. A wrapped assembly step means the artifact being certified by the checklist above is not the artifact Maven's own plugins produce, and a wrapped test step forfeits surefire's reporting. These convert before cutover or the cutover waits.
@@ -1803,7 +2074,7 @@ The decision per Chapter 7's criteria:
 
 A useful heuristic for the audit: if deleting an antrun execution would change what lands in `target/classes` or in the packaged artifact, it is build-proper work and needs a native Maven answer before cutover. If deleting it would only remove an external side effect, it can stay indefinitely. Record the outcome of the audit — which wrappers stay, which convert, and why — in the same commit or pull request that flips the authoritative flag, so the state of the escape hatches at cutover is part of the project's history rather than tribal knowledge.
 
-## 12. Troubleshooting and Common Pitfalls
+## 13. Troubleshooting and Common Pitfalls
 
 The chapters above covered the happy path. This chapter collects the problems that surface most often during and after an Ant-to-Maven migration, each as a symptom you will recognize, the cause, and the fix. Almost every entry traces back to the same root: Maven enforces rules Ant silently tolerated, so an old build's hidden assumptions become visible errors.
 
@@ -1839,13 +2110,13 @@ The chapters above covered the happy path. This chapter collects the problems th
 </build>
 ```
 
-With this rule bound (the `enforce` goal's default phase, `validate`, runs it before anything else), a build using an undeclared plugin version fails immediately with the plugin named, instead of quietly behaving differently between machines. Declare an explicit `<version>` for each plugin your build uses — pick current, stable releases and bump them deliberately with `versions:display-plugin-updates` from Chapter 10 — so the same POM produces the same build everywhere. Note that the rule requires versions to be *declared*; it does not choose them for you. The rule also flags the enforcer plugin itself like any other plugin — its failure output names `maven-enforcer-plugin` too if no version is declared for it — so its version should be declared as well, typically in `<pluginManagement>` rather than with a pin in the POM.
+With this rule bound (the `enforce` goal's default phase, `validate`, runs it before anything else), a build using an undeclared plugin version fails immediately with the plugin named, instead of quietly behaving differently between machines. Declare an explicit `<version>` for each plugin your build uses — pick current, stable releases and bump them deliberately with `versions:display-plugin-updates` from Chapter 11 — so the same POM produces the same build everywhere. Note that the rule requires versions to be *declared*; it does not choose them for you. The rule also flags the enforcer plugin itself like any other plugin — its failure output names `maven-enforcer-plugin` too if no version is declared for it — so its version should be declared as well, typically in `<pluginManagement>` rather than with a pin in the POM.
 
 **Symptom: after importing the project, the IDE shows red everywhere, sources are marked as plain folders instead of source roots, or m2e reports lifecycle-mapping errors for a plugin execution.** Eclipse's m2e connector and other IDE integrations assume the standard layout from Chapter 3 and a set of well-known plugin executions. A project that kept the legacy layout overrides (Chapter 3's alternative path) or that binds unusual goals to lifecycle phases confuses the importer: it either marks the wrong directories as source roots or refuses to manage the plugin execution at all. The fix is two-sided. First, adopt the standard layout — this is the strongest argument for Chapter 3's preferred path, because every IDE picks up `src/main/java` and `src/test/java` with zero configuration. Second, for plugin executions the IDE cannot handle, either bind them to phases the toolchain recognizes (`generate-sources`, `process-classes`) rather than running them ad hoc, or add the m2e lifecycle-mapping metadata the plugin's documentation describes for executions that should be ignored by the workspace build. IntelliJ's Maven importer is more tolerant of overrides but still reads them from the POM, so the same advice applies: fix the POM, not the IDE settings, or every developer repeats the configuration.
 
-**Symptom: builds that took seconds under Ant now take minutes.** Ant built only what its targets named; Maven runs the full lifecycle, resolves dependencies, and builds every module in the reactor, so an unconditional `mvn install` in a fifteen-module tree rebuilds everything every time. The fixes, in the order they usually matter: use partial builds while iterating — `mvn -pl acme-web -am package` builds one module and its dependencies only (Chapter 8); skip work you do not need with `-o` (offline mode, which skips remote checks when the local repository is warm) and `-DskipTests` or `-Dmaven.javadoc.skip=true` for runs where tests or javadoc are not the point; use `-T` (for example `mvn -T 1C package`) to run the reactor with parallel threads — safe when modules do not share output, which the reactor's dependency ordering mostly guarantees; and put a repository manager (Nexus or Artifactory) in front of your remote dependencies so repeated downloads hit the local network instead of Central, and cache `~/.m2/repository` in CI as Chapter 10 describes. If a build is still slow after all of these, profile it — `mvn -X` and the build-time summary at the end of the log show which plugin executions dominate, and an unexpectedly slow execution is often a misconfigured one (for example, an assembly descriptor scanning a huge directory).
+**Symptom: builds that took seconds under Ant now take minutes.** Ant built only what its targets named; Maven runs the full lifecycle, resolves dependencies, and builds every module in the reactor, so an unconditional `mvn install` in a fifteen-module tree rebuilds everything every time. The fixes, in the order they usually matter: use partial builds while iterating — `mvn -pl acme-web -am package` builds one module and its dependencies only (Chapter 9); skip work you do not need with `-o` (offline mode, which skips remote checks when the local repository is warm) and `-DskipTests` or `-Dmaven.javadoc.skip=true` for runs where tests or javadoc are not the point; use `-T` (for example `mvn -T 1C package`) to run the reactor with parallel threads — safe when modules do not share output, which the reactor's dependency ordering mostly guarantees; and put a repository manager (Nexus or Artifactory) in front of your remote dependencies so repeated downloads hit the local network instead of Central, and cache `~/.m2/repository` in CI as Chapter 11 describes. If a build is still slow after all of these, profile it — `mvn -X` and the build-time summary at the end of the log show which plugin executions dominate, and an unexpectedly slow execution is often a misconfigured one (for example, an assembly descriptor scanning a huge directory).
 
-**Symptom: the jar builds fine, but a properties file or XML descriptor that was in the Ant-built artifact is missing from the Maven-built one.** Two causes cover almost every case. First, the resource is not where Maven looks: files that sat next to the sources in the legacy layout (Chapter 2's inventory flags exactly this) must move to `src/main/resources` (or `src/test/resources` for test fixtures), because the resources plugin copies only those directories. Second, the file was produced by an Ant step that filtered, renamed, or generated it — a `<copy>` with a `<filterset>`, a `<replace>`, or a codegen step — and no Maven equivalent was configured, so the lifecycle packages whatever happens to be in `src/main/resources` and skips the transform. Check the built jar with `jar tf target/acme-core-1.0.0-SNAPSHOT.jar` and diff it against the Ant-built artifact (Chapter 11's verification checklist makes this a cutover gate). The fix is to move the files into the resources directories, and for generated or transformed files, add the plugin configuration from Chapter 5 (resources filtering, build-helper source roots) or Chapter 7's Antrun/exec escape hatch — not to copy the file into `target/` by hand.
+**Symptom: the jar builds fine, but a properties file or XML descriptor that was in the Ant-built artifact is missing from the Maven-built one.** Two causes cover almost every case. First, the resource is not where Maven looks: files that sat next to the sources in the legacy layout (Chapter 2's inventory flags exactly this) must move to `src/main/resources` (or `src/test/resources` for test fixtures), because the resources plugin copies only those directories. Second, the file was produced by an Ant step that filtered, renamed, or generated it — a `<copy>` with a `<filterset>`, a `<replace>`, or a codegen step — and no Maven equivalent was configured, so the lifecycle packages whatever happens to be in `src/main/resources` and skips the transform. Check the built jar with `jar tf target/acme-core-1.0.0-SNAPSHOT.jar` and diff it against the Ant-built artifact (Chapter 12's verification checklist makes this a cutover gate). The fix is to move the files into the resources directories, and for generated or transformed files, add the plugin configuration from Chapter 5 (resources filtering, build-helper source roots) or Chapter 8's Antrun/exec escape hatch — not to copy the file into `target/` by hand.
 
 **Symptom: the build warns `Using platform encoding (UTF-8 actually) to copy filtered resources, i.e. build is platform dependent!` — or compiles fine on one machine and produces mojibake on another.** Ant's `javac encoding="UTF-8"` was explicit; a POM with no encoding property leaves Maven to fall back on the platform's default charset, which differs between machines and operating systems. The fix is one property, which the baseline POM from Chapter 3 already sets — but it is worth restating because dropping it during a refactor is a common regression:
 
@@ -1858,11 +2129,11 @@ With this rule bound (the `enforce` goal's default phase, `validate`, runs it be
 </project>
 ```
 
-With `project.build.sourceEncoding` set, the compiler and resources plugins read and write sources and filtered resources as UTF-8 on every machine, and the warning disappears. Set it in the parent POM for multi-module builds (Chapter 8) so every module inherits it, and match it to the encoding the Ant `javac` actually used — a migration that changes the encoding at the same time as the build tool makes encoding bugs indistinguishable from migration bugs.
+With `project.build.sourceEncoding` set, the compiler and resources plugins read and write sources and filtered resources as UTF-8 on every machine, and the warning disappears. Set it in the parent POM for multi-module builds (Chapter 9) so every module inherits it, and match it to the encoding the Ant `javac` actually used — a migration that changes the encoding at the same time as the build tool makes encoding bugs indistinguishable from migration bugs.
 
 ## Appendix A: Ant Task to Maven Plugin Mapping
 
-The table below consolidates the task-by-task mapping in one place. The rows covered in depth in Chapter 5 — with before/after pairs for the core build steps — are marked there; the remaining rows are brief pointers, and Chapter 7's Antrun escape hatch is the fallback for anything not listed.
+The table below consolidates the task-by-task mapping in one place. The rows covered in depth in Chapter 5 — with before/after pairs for the core build steps — are marked there; the remaining rows are brief pointers, and Chapter 8's Antrun escape hatch is the fallback for anything not listed.
 
 | Ant task | Maven equivalent | Notes |
 | --- | --- | --- |
@@ -1876,12 +2147,12 @@ The table below consolidates the task-by-task mapping in one place. The rows cov
 | `zip`, `tar` | `maven-assembly-plugin` | Covered in Chapter 5. Bound to `package` with a descriptor; descriptors live under `src/assembly/`. |
 | fat jar (one-jar style merges) | `maven-shade-plugin` | Covered in Chapter 5. Include `ServicesResourceTransformer` to merge `META-INF/services/` correctly. |
 | `touch` | no direct equivalent (use `maven-antrun-plugin`) | Timestamp-touching files makes builds non-reproducible; usually a sign the step should be redesigned rather than converted. |
-| `<condition>` / `<if>` | profiles or plugin configuration | Conditional build logic maps to profile activation (Chapter 9) or to `<profiles>` with `activation` by property or file presence; per-execution conditions belong in plugin configuration. |
+| `<condition>` / `<if>` | profiles or plugin configuration | Conditional build logic maps to profile activation (Chapter 10) or to `<profiles>` with `activation` by property or file presence; per-execution conditions belong in plugin configuration. |
 | `signjar` | `maven-jarsigner-plugin` | Bind its `sign` goal (default phase `package`; often moved to `verify`); reads the keystore configuration from the plugin's `<configuration>`. |
 | `native2ascii` | `native2ascii-maven-plugin` (or resource encoding) | With `project.build.sourceEncoding` set and properties files written as UTF-8, modern JDKs often make the conversion unnecessary; otherwise bind the plugin's goal before `process-resources`. |
 | `replace` | `maven-resources-plugin` filtering | Token replacement during resource copy; use `@token@` delimiters and keep binaries out of filtered directories (Chapter 5). |
-| `ftp`, `scp` | `maven-deploy-plugin` with a `wagon` provider (or CI-level scripting) | Artifact publishing to a repository is `mvn deploy` (Chapter 10); arbitrary file transfer to servers belongs in the CI pipeline, not the build. |
+| `ftp`, `scp` | `maven-deploy-plugin` with a `wagon` provider (or CI-level scripting) | Artifact publishing to a repository is `mvn deploy` (Chapter 11); arbitrary file transfer to servers belongs in the CI pipeline, not the build. |
 | `sql` | `sql-maven-plugin` (Codehaus Mojo) | Executes SQL against a JDBC datasource; bind to a phase such as `generate-test-resources` for schema setup, with the driver as a plugin dependency. |
 | `wsimport` / `wsdl2java` | corresponding JAXB/CXF/Axis2 plugins | `jaxb2-maven-plugin`, `cxf-codegen-plugin`, or `axis2-wsdl2code-maven-plugin`, bound to `generate-sources`; generated sources are registered automatically (Chapter 5). |
 | `antlr` | `antlr4-maven-plugin` | Bound to `generate-sources` by default; registers its output under `target/generated-sources/` automatically. |
-| everything else | `maven-antrun-plugin` | Covered in Chapter 7. The escape hatch: embed any Ant task in the lifecycle, with the task jar declared in the plugin's `<dependencies>`. |
+| everything else | `maven-antrun-plugin` | Covered in Chapter 8. The escape hatch: embed any Ant task in the lifecycle, with the task jar declared in the plugin's `<dependencies>`. |
