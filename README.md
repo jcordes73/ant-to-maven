@@ -2319,7 +2319,8 @@ The table below consolidates the task-by-task mapping in one place. The rows cov
 | --- | --- | --- |
 | `javac` | `maven-compiler-plugin` | Covered in Chapter 5. Bound to `compile` by default; Java version via `maven.compiler.*` properties. |
 | `jar` | `maven-jar-plugin` | Covered in Chapter 5. Bound to `package` by default; manifest via the `archive` configuration. |
-| `war` | `maven-war-plugin` | Covered in Chapter 5. Bound to `package` when `<packaging>war</packaging>`. |
+| `war` | `maven-war-plugin` | Covered in Chapter 5. Bound to `package` when `<packaging>war</packaging>`. JEE packaging including `provided`-scope container APIs is covered in Chapter 7. |
+| `ear` | `maven-ear-plugin` | Covered in Chapter 8. Bound to `package` when `<packaging>ear</packaging>`; `META-INF/application.xml` generated from the `<modules>` configuration. |
 | `copy` (with `filterset`) | `maven-resources-plugin` | Covered in Chapter 5. Filtering enabled per resource directory; prefer `@token@` delimiters. |
 | `delete`, `mkdir` | `maven-clean-plugin` | Covered in Chapter 5. Usually deleted, not converted: `target/` is managed by the lifecycle. |
 | `junit` | `maven-surefire-plugin` | Covered in Chapters 5 and 6. Test discovery by naming conventions (`*Test`, `Test*`, `*Tests`). |
