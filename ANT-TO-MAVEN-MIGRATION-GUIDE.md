@@ -680,7 +680,7 @@ The Ant pattern — copy a properties file and substitute tokens while copying:
 </target>
 ```
 
-The Maven equivalent: resources in `src/main/resources` are copied and (with filtering on) token-substituted by `maven-resources-plugin` automatically — no configuration beyond switching filtering on. Maven's filter tokens use `@token@` by default rather than Ant's `@token` with a `filterset` (a deliberate difference that avoids collisions with Spring's `${}` placeholders):
+The Maven equivalent: resources in `src/main/resources` are copied and (with filtering on) token-substituted by `maven-resources-plugin` automatically — no configuration beyond switching filtering on. Note that Ant's `<filterset>` already defaults to `@token@` delimiters, and Maven's resources plugin substitutes both `${token}` and `@token@` by default, so writing tokens as `@token@` does not by itself protect `${}` placeholders that Spring or another framework needs at runtime — that requires restricting Maven to `@`-only delimiters (shown below):
 
 ```xml
 <build>
@@ -693,7 +693,7 @@ The Maven equivalent: resources in `src/main/resources` are copied and (with fil
 </build>
 ```
 
-With filtering enabled, a resource like `application.properties` that contained Ant-style tokens is rewritten to use the `@token@` form, and the tokens resolve from the POM itself:
+With filtering enabled, a resource like `application.properties` that contained Ant-style tokens is rewritten to use the `@token@` form, and the tokens resolve from the POM's project properties:
 
 ```properties
 app.name=@project.artifactId@
@@ -701,7 +701,28 @@ app.version=@project.version@
 build.jdk=@java.version@
 ```
 
-After the migration, `app.version` resolves to `1.0.0-SNAPSHOT` from the POM, with no per-release filter file to update. A caution that applies to the whole row: filtering is a per-resource-directory switch, and enabling it on a directory holding binary files (images, keystores) corrupts them. If `src/main/resources` mixes both, split binaries into a second `<resource>` entry with `filtering` left off. Also prefer `@project.version@` over Ant-style timestamp filters — a timestamp in a resource makes every build's output differ byte-for-byte, which breaks reproducible builds and bloats artifact repositories. If a filter value genuinely has no POM equivalent, define it as a `<property>` and reference it the same way.
+After the migration, `app.version` resolves to `1.0.0-SNAPSHOT` from the POM, with no per-release filter file to update. (`@java.version@` is the exception — it resolves from the JVM system properties of the JDK running the build, which is not necessarily the target Java version.)
+
+If your filtered resources contain `${...}` placeholders that must survive to runtime — Spring's `@Value("${some.key}")` injection is the common case — restrict the plugin to `@`-only delimiters so Maven leaves `${...}` alone:
+
+```xml
+<build>
+  <plugins>
+    <plugin>
+      <groupId>org.apache.maven.plugins</groupId>
+      <artifactId>maven-resources-plugin</artifactId>
+      <configuration>
+        <useDefaultDelimiters>false</useDefaultDelimiters>
+        <delimiters>
+          <delimiter>@</delimiter>
+        </delimiters>
+      </configuration>
+    </plugin>
+  </plugins>
+</build>
+```
+
+With this configuration, only `@token@` references are substituted and any unfiltered `${...}` placeholders pass through the copied resources verbatim. A caution that applies to the whole row: filtering is a per-resource-directory switch, and enabling it on a directory holding binary files (images, keystores) corrupts them. If `src/main/resources` mixes both, split binaries into a second `<resource>` entry with `filtering` left off. Also prefer `@project.version@` over Ant-style timestamp filters — a timestamp in a resource makes every build's output differ byte-for-byte, which breaks reproducible builds and bloats artifact repositories. If a filter value genuinely has no POM equivalent, define it as a `<property>` and reference it the same way.
 
 ### Distribution archives: `zip` vs `maven-assembly-plugin`
 
