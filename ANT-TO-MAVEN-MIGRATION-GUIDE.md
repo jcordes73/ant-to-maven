@@ -1565,7 +1565,169 @@ Profiles solve build-time variation, and environment configuration is usually no
 
 ## 10. Phase 8: CI/CD and Release
 
-TODO: content
+The previous phases moved the build itself to Maven. This chapter moves what surrounds it: the CI pipeline, the versioning discipline the build enforces, the release process, and the deploy step that publishes artifacts to a repository. The pattern is the same as every earlier phase — replace the bespoke Ant invocation with the standard Maven one, and let the framework supply what the script used to define by hand.
+
+### Continuous integration
+
+The Ant CI job was a shell script. It looked something like this:
+
+```bash
+ant clean test jar
+```
+
+possibly preceded by a checkout, a dependency-download step (or a committed `lib/` directory), and followed by archiving `dist/` somewhere. The job had to know the Ant targets by name, and every project's job was slightly different.
+
+The Maven replacement is a lifecycle invocation, which is identical for every project:
+
+```bash
+mvn verify
+```
+
+`verify` runs everything up to and including the integration-test and verify phases — compile, test, package, and any integration checks bound by plugins (coverage thresholds, static analysis, integration tests from the earlier chapters). It is the right default for CI because it exercises everything `package` does plus the gates, and it leaves the artifact in `target/` ready to be archived or deployed. If your CI also produces coverage reports or site documentation, those are additional goals on the same invocation (`mvn verify site`), not a separate script.
+
+Two flags belong on every CI invocation:
+
+- `-B` (batch mode) disables ANSI color codes and progress spinners in the output, which matters the moment the log is rendered in a web UI or written to a file.
+- `-ntp` (`--no-transfer-progress`) suppresses the per-jar download progress lines. Without it, a build that resolves several hundred dependencies floods the log with transfer noise; with it, the log contains only what happened, not every byte that moved.
+
+So the canonical CI command is:
+
+```bash
+mvn -B -ntp verify
+```
+
+Caching is the other CI concern. The Ant build resolved nothing — dependencies sat in `lib/` or a shared directory, so a clean CI machine was free. Maven resolves everything into the local repository, `~/.m2/repository`, on every fresh machine, which means the first CI build after a cache miss downloads the dependency tree. Cache that directory between builds: your CI system's standard dependency caching (the cache action in GitHub Actions, the `caches` section in GitLab CI, or the workspace retention in Jenkins) should point at `~/.m2/repository`. Two cautions: cache the repository directory, not the whole `~/.m2` (the local repository is content-addressed and safe to share; `settings.xml` and other state are not worth caching), and treat the cache as disposable — a build must always succeed on a cold cache, or you have an undeclared dependency on something outside the POM. Test that occasionally by running the job with the cache cleared.
+
+### Versioning discipline: SNAPSHOT vs. release
+
+Ant builds typically had no enforced version discipline. The version string lived in a property, `dist` produced `acme-core-1.0.0.jar` every time regardless of what had changed, and the same filename could mean three different binaries depending on when it was built — or, if someone bumped the property manually, the jar name changed while nothing else did.
+
+Maven enforces the distinction the Ant build left implicit. A version is either a **SNAPSHOT** (`1.0.0-SNAPSHOT`, what acme-core carries through development) or a **release** (`1.0.0`), and the two behave differently everywhere:
+
+- A SNAPSHOT is a mutable version. Maven stores it in the local repository under the base version, and a repository manager stores the dated snapshots behind it. When acme-web declares a dependency on `acme-core:1.0.0-SNAPSHOT`, Maven checks the remote repository for a newer snapshot (subject to update policies) and re-resolves when one appears. A SNAPSHOT says: this is in flux, re-download me.
+- A release is immutable, by convention and by configuration. Once `acme-core:1.0.0` is published to a repository, that repository will refuse a second deploy of the same coordinates — the repository manager's non-redeploy policy, which exists precisely to make `1.0.0` mean one binary forever. A release says: this is frozen; if anything changes, the version changes.
+
+That immutability is what turns artifacts into something you can promote. Chapter 9's one-build-fits-all-artifact principle — build once, promote the same binary through every environment — only works if a version identifies exactly one artifact, and only the SNAPSHOT/release split plus non-redeploy gives you that. Ant could be disciplined about this, but nothing in Ant enforced it; in Maven, a redeploy of a release fails, and `1.0.0-SNAPSHOT` failing to update is a signal that something upstream did not deploy.
+
+The working rules that fall out of this:
+
+- Development happens on `...-SNAPSHOT` versions, and SNAPSHOT versions are only ever deployed to the snapshot repository.
+- A release is a SNAPSHOT with the suffix removed, deployed once to the release repository, and tagged in version control.
+- Nothing in the POM's `<version>` is hand-edited during a release — the tooling in the next section owns that change.
+
+### Release tooling
+
+Two Maven plugins cover what the Ant release script did with `sed`, a properties file, and a tagging target.
+
+**Bulk version changes with versions-maven-plugin.** Bumping acme-core from `1.0.0-SNAPSHOT` to `1.0.0` — in a multi-module tree, every module's version and every inter-module dependency reference at once — is one goal:
+
+```bash
+mvn versions:set -DnewVersion=1.0.0
+```
+
+The plugin rewrites every `<version>` in the reactor's POMs, including the inherited versions and the `${project.version}`-based dependency references, and writes a backup of each file it touched. If the result looks wrong, undo it in one step:
+
+```bash
+mvn versions:revert
+```
+
+and when it looks right, remove the backups and commit:
+
+```bash
+mvn versions:commit
+```
+
+(There is no separate `versions:commit-revert` goal pair to configure — `revert` and `commit` are two goals over the same backups: `revert` restores from them, `commit` deletes them.) The plugin also covers the adjacent chores: `versions:set -DnextSnapshot=true` moves back to `1.0.1-SNAPSHOT` after a release, `versions:display-dependency-updates` and `versions:use-latest-releases` report and apply third-party version bumps, and `versions:display-plugin-updates` does the same for build plugins.
+
+**Tagged, reproducible releases with maven-release-plugin.** The `maven-release-plugin` automates the whole cut: flip the POMs to the release version, build and test from a clean checkout of that exact source state, deploy the release artifacts, commit the POMs back with the next development SNAPSHOT, and create a tag at the release commit. It is configured in the parent POM:
+
+```xml
+<project>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-release-plugin</artifactId>
+        <configuration>
+          <tagNameFormat>v@{project.version}</tagNameFormat>
+          <releaseProfiles>release</releaseProfiles>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+```
+
+Two settings matter most. `tagNameFormat` controls the tag name — `@{project.version}` is substituted with the release version, giving tags like `v1.0.0` that match whatever scheme your team used in Ant. `releaseProfiles` names profiles (from Chapter 9) activated only during the release build — the usual home for javadoc and source-jar generation that you do not want on every developer build. Running the release is then two commands:
+
+```bash
+mvn release:prepare
+mvn release:perform
+```
+
+`prepare` prompts for the release and next-development versions, rewrites the POMs, runs the full build at the release version, and commits the tag; `perform` re-checks out the tag and runs `deploy` from it, which is what makes the published artifact correspond exactly to a commit you can check out later. The plugin requires a clean working tree and push access to the SCM — the same preconditions the Ant release script enforced by convention, now enforced by the tool.
+
+### Deploy
+
+Deploying is publishing to a remote repository, and it is the one Maven step with no Ant counterpart at all — Ant's "deploy" was a `<copy>` to a shared directory, which is exactly the practice Maven's repository model replaces.
+
+The destination is declared in the POM's `<distributionManagement>` section, with a repository id (not a URL) that `settings.xml` keys off. For a project that publishes both releases and snapshots:
+
+```xml
+<project>
+  <distributionManagement>
+    <repository>
+      <id>acme-releases</id>
+      <url>https://repo.example.com/releases</url>
+    </repository>
+    <snapshotRepository>
+      <id>acme-snapshots</id>
+      <url>https://repo.example.com/snapshots</url>
+    </snapshotRepository>
+  </distributionManagement>
+</project>
+```
+
+Maven picks the destination by version: `1.0.0` goes to `<repository>`, `1.0.0-SNAPSHOT` goes to `<snapshotRepository>`, which is how the SNAPSHOT/release discipline from the previous section is wired into the deploy step with no extra logic.
+
+The credentials are not in the POM. They live in `settings.xml`, matched by the repository's `<id>`:
+
+```xml
+<settings>
+  <servers>
+    <server>
+      <id>acme-releases</id>
+      <username>ci-user</username>
+      <password>${env.REPO_PASSWORD}</password>
+    </server>
+    <server>
+      <id>acme-snapshots</id>
+      <username>ci-user</username>
+      <password>${env.REPO_PASSWORD}</password>
+    </server>
+  </servers>
+</settings>
+```
+
+This is the `settings.xml` usage from Chapter 9 in its most important role: per-machine secrets stay out of the versioned POM, and the CI machine's `settings.xml` (or its equivalent, injected by the CI system) carries the deploy credentials. The `<id>` is the join key — it must match `<distributionManagement>` exactly, and a mismatch surfaces as a 401 on deploy, not a configuration error at parse time.
+
+Publishing acme-core is then:
+
+```bash
+mvn -B -ntp deploy
+```
+
+which runs the lifecycle through `deploy`, and for each artifact built, uploads it to the repository the version selects. In CI, deploy is typically gated: `mvn -B -ntp verify` on every commit, `mvn -B -ntp deploy` only on the main branch (deploying snapshots) or on a release trigger (via `maven-release-plugin`, whose `release:perform` runs deploy for you).
+
+### Phase 8 checklist
+
+- [ ] CI invokes `mvn -B -ntp verify` instead of `ant clean test jar`, and the build succeeds on a machine with no `~/.m2/repository` cache
+- [ ] `~/.m2/repository` cached between CI builds, with a periodic cold-cache run to catch undeclared dependencies
+- [ ] All modules on `...-SNAPSHOT` during development; no hand-edited version bumps during release
+- [ ] `versions-maven-plugin` used for bulk version changes (`versions:set`, with `versions:commit`/`versions:revert` over the backups)
+- [ ] `maven-release-plugin` configured in the parent POM with `tagNameFormat` and `releaseProfiles`; releases produced by `release:prepare`/`release:perform` and tagged
+- [ ] `<distributionManagement>` in the parent POM with separate release and snapshot repositories, ids matching `<server>` entries in `settings.xml`
+- [ ] Deploy credentials in `settings.xml` only (injected into CI, never in the POM or version control); `mvn -B -ntp deploy` publishes snapshots on the main branch and releases via the release plugin
 
 ## 11. Phase 9: Cutover and Decommissioning
 
