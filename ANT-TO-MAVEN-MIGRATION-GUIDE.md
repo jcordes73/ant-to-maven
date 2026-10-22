@@ -879,7 +879,171 @@ The directory you register should live under `target/generated-sources/` — IDE
 
 ## 6. Phase 4: Migrate Tests
 
-TODO: content
+Phase 4 replaces the test targets in your `build.xml` — the `<junit>` blocks, the hand-assembled test classpath, the report formatters, and any separate integration-test targets — with Maven's testing conventions. As in Phase 3, most of the work is deletion: the standard layout plus the Surefire plugin's defaults cover what a typical Ant test target does by hand.
+
+### Unit tests: `junit` vs `maven-surefire-plugin`
+
+The Ant side, typical of a build that grew organically. Note everything the target does manually: assembling the classpath from `lib/` and two build directories, selecting tests with an explicit include pattern, and configuring a report formatter:
+
+```xml
+<target name="test" depends="compile-tests">
+  <mkdir dir="${build.dir}/test-reports"/>
+  <junit printsummary="yes" haltonfailure="yes">
+    <classpath>
+      <pathelement path="${build.dir}/classes"/>
+      <pathelement path="${build.dir}/test-classes"/>
+      <fileset dir="lib" includes="*.jar"/>
+    </classpath>
+    <batchtest todir="${build.dir}/test-reports">
+      <fileset dir="${test.dir}">
+        <include name="**/*Test.java"/>
+      </fileset>
+    </batchtest>
+    <formatter type="xml"/>
+  </junit>
+</target>
+```
+
+The Maven side is a command, not a target: `mvn test`. The `maven-surefire-plugin` is already bound to the `test` phase (as noted in Chapter 5), so the baseline POM from Chapter 3 already runs your tests. Surefire discovers every class in `src/test/java` whose name matches its conventions — `*Test`, `Test*`, `*Tests`, and `*TestCase` — so the explicit `<include name="**/*Test.java">` disappears. The classpath assembly disappears too: main classes plus test-scoped dependencies (acme-core's `junit-jupiter`, for example) are on the test classpath automatically. Reports in XML and plain-text form are written to `target/surefire-reports/` without a `<formatter>` element, and a failing test fails the build the way `haltonfailure="yes"` did.
+
+You configure Surefire only when you are overriding a default. A common case is excluding slow or environment-dependent tests from every run:
+
+```xml
+<build>
+  <plugins>
+    <plugin>
+      <groupId>org.apache.maven.plugins</groupId>
+      <artifactId>maven-surefire-plugin</artifactId>
+      <configuration>
+        <excludes>
+          <exclude>**/*SlowTest.java</exclude>
+        </excludes>
+      </configuration>
+    </plugin>
+  </plugins>
+</build>
+```
+
+The one adjustment that may be needed is renaming. Test classes whose names do not match the conventions — `LegacyChecks`, `AllTheTestsRunner` — are silently not run by Surefire, which is worse than an Ant build that missed them, because in Ant the include list at least made the selection visible. Rename nonconforming classes as part of the migration, or add an explicit `<includes>` configuration for the stragglers and delete it as they are renamed.
+
+### TestNG
+
+If your tests use TestNG rather than JUnit, nothing above changes structurally: Surefire runs TestNG tests too, auto-detecting them from the classpath, and the same naming conventions apply. Where your Ant build drove TestNG through `testng` XML suite files, point Surefire at them with a `<suiteXmlFiles>` configuration; otherwise no configuration is needed at all.
+
+### Test resources
+
+In the Ant build, test fixtures — property files, sample XML, certificates — were usually another `<copy>` step into the test classpath directory, wired into the `test` target's `depends` chain. In Maven, test resources have a home: `src/test/resources`. Everything in that directory is copied onto the test classpath by the `process-test-resources` phase, before tests compile and run, with no configuration and no copy step. The same filtering described for main resources in Chapter 5 applies here: add `<filtering>true</filtering>` to the `src/test/resources` resource declaration if a fixture file contains tokens to substitute. Move the files, delete the copy step, and the test classpath looks after itself.
+
+### Coverage: JaCoCo
+
+Coverage in Ant means wrapping the `junit` task in a coverage tool's instrumentation and then generating a report from the execution data. With the JaCoCo Ant library:
+
+```xml
+<target name="coverage" depends="compile-tests" xmlns:jacoco="antlib:org.jacoco.ant">
+  <jacoco:coverage destfile="${build.dir}/jacoco.exec">
+    <junit printsummary="yes" haltonfailure="yes">
+      <classpath path="${build.dir}/classes"/>
+      <batchtest>
+        <fileset dir="${test.dir}">
+          <include name="**/*Test.java"/>
+        </fileset>
+      </batchtest>
+    </junit>
+  </jacoco:coverage>
+</target>
+```
+
+followed, in most builds, by a second `jacoco:report` invocation to turn the `.exec` file into HTML — two more targets' worth of wiring to maintain. If your build used Cobertura instead, the pattern was similar but with its own instrumentation and report tasks, and Cobertura itself has been effectively unmaintained for years.
+
+The Maven side is the `jacoco-maven-plugin` with two executions. The `prepare-agent` goal instruments the JVM before tests run (its default binding, `initialize`, is early enough), and the `report` goal turns the execution data into an HTML report under `target/site/jacoco`:
+
+```xml
+<build>
+  <plugins>
+    <plugin>
+      <groupId>org.jacoco</groupId>
+      <artifactId>jacoco-maven-plugin</artifactId>
+      <executions>
+        <execution>
+          <id>prepare-agent</id>
+          <goals>
+            <goal>prepare-agent</goal>
+          </goals>
+        </execution>
+        <execution>
+          <id>report</id>
+          <phase>verify</phase>
+          <goals>
+            <goal>report</goal>
+          </goals>
+        </execution>
+      </executions>
+    </plugin>
+  </plugins>
+</build>
+```
+
+Binding `report` to the `verify` phase means `mvn verify` runs tests and then produces the coverage report — one command, no separate `coverage` target, and CI can collect the report from a known location. The explicit `<phase>verify</phase>` is technically redundant (it is the `report` goal's default binding) but is worth declaring so the intent is visible in the POM.
+
+### Integration tests: Failsafe
+
+Many Ant builds separate long-running or environment-dependent tests into a second target, run on demand or from a different CI job, so that `ant test` stays fast:
+
+```xml
+<target name="itest" depends="jar">
+  <mkdir dir="${build.dir}/itest-reports"/>
+  <junit printsummary="yes" haltonfailure="yes">
+    <classpath>
+      <pathelement path="${build.dir}/classes"/>
+      <pathelement path="${build.dir}/test-classes"/>
+      <fileset dir="lib" includes="*.jar"/>
+    </classpath>
+    <batchtest todir="${build.dir}/itest-reports">
+      <fileset dir="${test.dir}">
+        <include name="**/*IT.java"/>
+      </fileset>
+    </batchtest>
+    <formatter type="xml"/>
+  </junit>
+</target>
+```
+
+Maven's equivalent is the `maven-failsafe-plugin`, which is Surefire's sibling for integration tests. It uses the same discovery machinery but with `*IT` naming conventions, so integration tests live alongside unit tests in `src/test/java` and are distinguished by name. Its two goals split the work: `integration-test` runs the tests (bound to the `integration-test` phase), and `verify` fails the build if any of them failed (bound to the `verify` phase). The split exists so that cleanup code can run between the two — a failing integration test does not prevent `post-integration-test` cleanup from executing:
+
+```xml
+<build>
+  <plugins>
+    <plugin>
+      <groupId>org.apache.maven.plugins</groupId>
+      <artifactId>maven-failsafe-plugin</artifactId>
+      <executions>
+        <execution>
+          <goals>
+            <goal>integration-test</goal>
+            <goal>verify</goal>
+          </goals>
+        </execution>
+      </executions>
+    </plugin>
+  </plugins>
+</build>
+```
+
+With this in place, `mvn install` or `mvn verify` runs unit tests via Surefire and then integration tests via Failsafe, with reports under `target/failsafe-reports/`. Rename the classes picked up by the old `<include name="**/*IT.java">` to end in `IT` if they do not already (the include pattern and the convention usually agree), and delete the `itest` target.
+
+### JUnit 4 vs JUnit 5
+
+Acme-core's dependency from Chapter 4 is `junit-jupiter`, which brings the JUnit Platform that Surefire uses to discover and run tests. Running JUnit 5 tests requires Surefire 2.22.0 or newer; every current Maven version ships a compatible Surefire by default, so this is only worth checking if your POM or parent pins an older one. The migration trap is the reverse case: a codebase mid-migration that still has JUnit 4 tests. The JUnit Platform does not run them by default — add the `junit-vintage-engine` as a test-scoped dependency alongside `junit-jupiter`, and the platform runs both generations in the same `mvn test`. Plan to remove the vintage engine once the last JUnit 4 test is rewritten; its presence is a migration marker, not an end state.
+
+### Phase 4 checklist
+
+- [ ] Every `<junit>` block in the build.xml replaced by Surefire's defaults (or a deliberate `<includes>`/`<excludes>` override)
+- [ ] Test classes renamed to match the conventions, or stragglers covered by explicit configuration
+- [ ] Test fixtures moved to `src/test/resources`; Ant copy steps deleted
+- [ ] Coverage via `jacoco-maven-plugin` `prepare-agent` + `report`, with the report produced by `mvn verify` under `target/site/jacoco`
+- [ ] Integration tests migrated to Failsafe with `*IT` naming; the separate `itest` target deleted
+- [ ] JUnit 4 legacy tests (if any) running under the vintage engine, with removal tracked
+- [ ] `mvn verify` runs unit tests, integration tests, and produces both Surefire and JaCoCo reports
 
 ## 7. Phase 5: Custom Ant Tasks and the Antrun Escape Hatch
 
