@@ -1805,8 +1805,83 @@ A useful heuristic for the audit: if deleting an antrun execution would change w
 
 ## 12. Troubleshooting and Common Pitfalls
 
-TODO: content
+The chapters above covered the happy path. This chapter collects the problems that surface most often during and after an Ant-to-Maven migration, each as a symptom you will recognize, the cause, and the fix. Almost every entry traces back to the same root: Maven enforces rules Ant silently tolerated, so an old build's hidden assumptions become visible errors.
+
+**Symptom: the build fails with a dependency convergence or `omitted for conflict` error, or `mvn dependency:tree -Dverbose` shows two versions of the same artifact.** In the Ant build, `commons-lang-2.6.jar` and `commons-lang3-3.14.0.jar` sat side by side in `lib/` for years; Maven refuses to put two versions of one artifact on a classpath and resolves the conflict with the nearest-wins rule described in Chapter 4. Nearest-wins is deterministic but the winner is chosen by tree distance, not by judgment — and if an enforcer rule or a strict resolution strategy is in play, the convergence failure is a hard error. The fix is to make the decision yourself: pin the version you want with `<dependencyManagement>` (Chapter 4's example pins `log4j-api`), or remove the unwanted version where it comes from with an `<exclusions>` block on the dependency that pulls it in. Prefer `<dependencyManagement>` for versions your project controls and `<exclusions>` for a transitive dependency that genuinely should not be there; run `mvn dependency:tree -Dverbose` after each change to confirm the resolution.
+
+**Symptom: a `ClassNotFoundException` at runtime for a class that compiled fine, or a test that cannot see a class the main code imports.** These are scope leaks, the flip side of Chapter 4's scope table. The first case is usually a dependency marked `provided` (servlet API, annotation processor, Lombok) that is actually needed at runtime — `provided` is on the compile classpath only, so the code compiles and then fails when the jar runs outside the container that was supposed to supply it. The second case is the reverse: a jar marked `test` that the main sources import, which the compiler rejects, or — the sneakier variant — a `test`-scoped dependency that silently changed what a transitive consumer sees. `mvn dependency:tree` prints the scope of every node; scan it for any scope you did not assign deliberately. The fix is to re-scope honestly: `compile` for anything main code uses, `provided` only for what the container or JVM supplies, `runtime` for JDBC drivers and service-loader implementations, `test` for test-only jars.
+
+**Symptom: the build's behavior changed over time, or two machines with the same POM build differently, with no POM change in between.** Maven does not pin plugin versions by default. When a plugin is not declared in the POM, Maven resolves the version from the lifecycle bindings of the Maven version installed on that machine — which means a Maven upgrade, or a difference between developer and CI Maven versions, can change compiler, surefire, or resources plugin behavior without anything in the repository changing. The fix is to require every plugin's version to be declared, and the tool for enforcing that is `maven-enforcer-plugin` with the `requirePluginVersions` rule:
+
+```xml
+<build>
+  <plugins>
+    <plugin>
+      <groupId>org.apache.maven.plugins</groupId>
+      <artifactId>maven-enforcer-plugin</artifactId>
+      <executions>
+        <execution>
+          <id>enforce-plugin-versions</id>
+          <goals>
+            <goal>enforce</goal>
+          </goals>
+          <configuration>
+            <rules>
+              <requirePluginVersions>
+                <message>Every plugin must declare its version in the POM.</message>
+              </requirePluginVersions>
+            </rules>
+          </configuration>
+        </execution>
+      </executions>
+    </plugin>
+  </plugins>
+</build>
+```
+
+With this rule bound (the `enforce` goal's default phase, `validate`, runs it before anything else), a build using an undeclared plugin version fails immediately with the plugin named, instead of quietly behaving differently between machines. Declare an explicit `<version>` for each plugin your build uses — pick current, stable releases and bump them deliberately with `versions:display-plugin-updates` from Chapter 10 — so the same POM produces the same build everywhere. Note that the rule requires versions to be *declared*; it does not choose them for you, and it says nothing about pinning the enforcer plugin's own version.
+
+**Symptom: after importing the project, the IDE shows red everywhere, sources are marked as plain folders instead of source roots, or m2e reports lifecycle-mapping errors for a plugin execution.** Eclipse's m2e connector and other IDE integrations assume the standard layout from Chapter 3 and a set of well-known plugin executions. A project that kept the legacy layout overrides (Chapter 3's alternative path) or that binds unusual goals to lifecycle phases confuses the importer: it either marks the wrong directories as source roots or refuses to manage the plugin execution at all. The fix is two-sided. First, adopt the standard layout — this is the strongest argument for Chapter 3's preferred path, because every IDE picks up `src/main/java` and `src/test/java` with zero configuration. Second, for plugin executions the IDE cannot handle, either bind them to phases the toolchain recognizes (`generate-sources`, `process-classes`) rather than running them ad hoc, or add the m2e lifecycle-mapping metadata the plugin's documentation describes for executions that should be ignored by the workspace build. IntelliJ's Maven importer is more tolerant of overrides but still reads them from the POM, so the same advice applies: fix the POM, not the IDE settings, or every developer repeats the configuration.
+
+**Symptom: builds that took seconds under Ant now take minutes.** Ant built only what its targets named; Maven runs the full lifecycle, resolves dependencies, and builds every module in the reactor, so an unconditional `mvn install` in a fifteen-module tree rebuilds everything every time. The fixes, in the order they usually matter: use partial builds while iterating — `mvn -pl acme-web -am package` builds one module and its dependencies only (Chapter 8); skip work you do not need with `-o` (offline mode, which skips remote checks when the local repository is warm) and `-DskipTests` or `-Dmaven.javadoc.skip=true` for runs where tests or javadoc are not the point; use `-T` (for example `mvn -T 1C package`) to run the reactor with parallel threads — safe when modules do not share output, which the reactor's dependency ordering mostly guarantees; and put a repository manager (Nexus or Artifactory) in front of your remote dependencies so repeated downloads hit the local network instead of Central, and cache `~/.m2/repository` in CI as Chapter 10 describes. If a build is still slow after all of these, profile it — `mvn -X` and the build-time summary at the end of the log show which plugin executions dominate, and an unexpectedly slow execution is often a misconfigured one (for example, an assembly descriptor scanning a huge directory).
+
+**Symptom: the jar builds fine, but a properties file or XML descriptor that was in the Ant-built artifact is missing from the Maven-built one.** Two causes cover almost every case. First, the resource is not where Maven looks: files that sat next to the sources in the legacy layout (Chapter 2's inventory flags exactly this) must move to `src/main/resources` (or `src/test/resources` for test fixtures), because the resources plugin copies only those directories. Second, the file was produced by an Ant step that filtered, renamed, or generated it — a `<copy>` with a `<filterset>`, a `<replace>`, or a codegen step — and no Maven equivalent was configured, so the lifecycle packages whatever happens to be in `src/main/resources` and skips the transform. Check the built jar with `jar tf target/acme-core-1.0.0-SNAPSHOT.jar` and diff it against the Ant-built artifact (Chapter 11's verification checklist makes this a cutover gate). The fix is to move the files into the resources directories, and for generated or transformed files, add the plugin configuration from Chapter 5 (resources filtering, build-helper source roots) or Chapter 7's Antrun/exec escape hatch — not to copy the file into `target/` by hand.
+
+**Symptom: the build warns `Using platform encoding (UTF-8 actually) to copy filtered resources, i.e. build is platform dependent!` — or compiles fine on one machine and produces mojibake on another.** Ant's `javac encoding="UTF-8"` was explicit; a POM with no encoding property leaves Maven to fall back on the platform's default charset, which differs between machines and operating systems. The fix is one property, which the baseline POM from Chapter 3 already sets — but it is worth restating because dropping it during a refactor is a common regression:
+
+```xml
+<project>
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+  </properties>
+</project>
+```
+
+With `project.build.sourceEncoding` set, the compiler and resources plugins read and write sources and filtered resources as UTF-8 on every machine, and the warning disappears. Set it in the parent POM for multi-module builds (Chapter 8) so every module inherits it, and match it to the encoding the Ant `javac` actually used — a migration that changes the encoding at the same time as the build tool makes encoding bugs indistinguishable from migration bugs.
 
 ## Appendix A: Ant Task to Maven Plugin Mapping
 
-TODO: content
+The table below consolidates the task-by-task mapping in one place. The rows covered in depth in Chapter 5 — with before/after pairs for the core build steps — are marked there; the remaining rows are brief pointers, and Chapter 7's Antrun escape hatch is the fallback for anything not listed.
+
+| Ant task | Maven equivalent | Notes |
+| --- | --- | --- |
+| `javac` | `maven-compiler-plugin` | Covered in Chapter 5. Bound to `compile` by default; Java version via `maven.compiler.*` properties. |
+| `jar` | `maven-jar-plugin` | Covered in Chapter 5. Bound to `package` by default; manifest via the `archive` configuration. |
+| `war` | `maven-war-plugin` | Covered in Chapter 5. Bound to `package` when `<packaging>war</packaging>`. |
+| `copy` (with `filterset`) | `maven-resources-plugin` | Covered in Chapter 5. Filtering enabled per resource directory; prefer `@token@` delimiters. |
+| `delete`, `mkdir` | `maven-clean-plugin` | Covered in Chapter 5. Usually deleted, not converted: `target/` is managed by the lifecycle. |
+| `junit` | `maven-surefire-plugin` | Covered in Chapters 5 and 6. Test discovery by naming conventions (`*Test`, `Test*`, `*Tests`). |
+| `javadoc` | `maven-javadoc-plugin` | Covered in Chapter 5. Run on demand or bound to `package`/`verify` for release builds. |
+| `zip`, `tar` | `maven-assembly-plugin` | Covered in Chapter 5. Bound to `package` with a descriptor; descriptors live under `src/assembly/`. |
+| fat jar (one-jar style merges) | `maven-shade-plugin` | Covered in Chapter 5. Include `ServicesResourceTransformer` to merge `META-INF/services/` correctly. |
+| `touch` | no direct equivalent (use `maven-antrun-plugin`) | Timestamp-touching files makes builds non-reproducible; usually a sign the step should be redesigned rather than converted. |
+| `<condition>` / `<if>` | profiles or plugin configuration | Conditional build logic maps to profile activation (Chapter 9) or to `<profiles>` with `activation` by property or file presence; per-execution conditions belong in plugin configuration. |
+| `signjar` | `maven-jarsigner-plugin` | Bound to `verify` (its `sign` goal); reads the keystore configuration from the plugin's `<configuration>`. |
+| `native2ascii` | `native2ascii-maven-plugin` (or resource encoding) | With `project.build.sourceEncoding` set and properties files written as UTF-8, modern JDKs often make the conversion unnecessary; otherwise bind the plugin's goal before `process-resources`. |
+| `replace` | `maven-resources-plugin` filtering | Token replacement during resource copy; use `@token@` delimiters and keep binaries out of filtered directories (Chapter 5). |
+| `ftp`, `scp` | `maven-deploy-plugin` with a `wagon` provider (or CI-level scripting) | Artifact publishing to a repository is `mvn deploy` (Chapter 10); arbitrary file transfer to servers belongs in the CI pipeline, not the build. |
+| `sql` | `sql-maven-plugin` (Codehaus Mojo) | Executes SQL against a JDBC datasource; bind to a phase such as `generate-test-resources` for schema setup, with the driver as a plugin dependency. |
+| `wsimport` / `wsdl2java` | corresponding JAXB/CXF/Axis2 plugins | `jaxb2-maven-plugin`, `cxf-codegen-plugin`, or `axis2-wsdl2code-maven-plugin`, bound to `generate-sources`; generated sources are registered automatically (Chapter 5). |
+| `antlr` | `antlr4-maven-plugin` | Bound to `generate-sources` by default; registers its output under `target/generated-sources/` automatically. |
+| everything else | `maven-antrun-plugin` | Covered in Chapter 7. The escape hatch: embed any Ant task in the lifecycle, with the task jar declared in the plugin's `<dependencies>`. |
