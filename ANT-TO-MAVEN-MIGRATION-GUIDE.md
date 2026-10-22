@@ -569,7 +569,292 @@ The Maven compiler plugin reads `maven.compiler.debug` as a property, so `mvn co
 
 ## 5. Phase 3: Map Build Steps to Plugins
 
-TODO: content
+Phase 3 replaces the body of your Ant `build.xml` — the targets that compile, jar, copy, and package — with Maven plugins. The good news is that most Ant builds are a small set of common tasks, and each of those tasks has a direct, well-documented Maven equivalent. The work is not inventing configuration; it is reading each target in your inventory from Chapter 2 and translating it, one row at a time.
+
+### The lifecycle: where Ant targets go
+
+In Ant, you wire the build yourself: a `jar` target `depends` on `compile`, which `depends` on `init`, and the caller invokes the entry point. In Maven, the wiring already exists. The build is a fixed sequence of lifecycle phases — `validate`, `compile`, `test`, `package`, `verify`, `install`, `deploy` — and each phase runs in order. When you run `mvn package`, Maven runs everything up to and including `package`: resources are copied, sources compiled, tests run, and the jar assembled. You never declare that `jar` depends on `compile`, because that relationship is built into the lifecycle.
+
+Plugins are what do the work at each phase. A plugin contributes *goals* (individual executable units, written `plugin-artifact:goal` — for example `maven-compiler-plugin:compile`), and goals bind to phases. The built-in lifecycle bindings mean a POM with no plugin configuration at all already compiles and jars: `maven-compiler-plugin`'s `compile` goal is bound to the `compile` phase, `maven-surefire-plugin`'s `test` goal to the `test` phase, and `maven-jar-plugin`'s `jar` goal to the `package` phase. Your Phase 3 work is therefore mostly of two kinds: configuring the plugins that are already bound (compiler options, manifest entries, resource filtering) and, where an Ant target did something the lifecycle does not cover, adding a plugin and binding one of its goals to a phase yourself. Appendix A has the full task-by-task mapping; the table below covers the tasks that account for nearly all of a typical build file.
+
+### The core mapping
+
+| Ant task | Maven plugin | Notes |
+| --- | --- | --- |
+| `javac` | `maven-compiler-plugin` | Bound to `compile` by default. Java version via `maven.compiler.*` properties (already set in the baseline POM). |
+| `jar` | `maven-jar-plugin` | Bound to `package` by default. Manifest, includes/excludes via its `archive` configuration. |
+| `war` | `maven-war-plugin` | Bound to `package` when `<packaging>war</packaging>`. Replaces the `war` target and its `lib/` assembly. |
+| `copy` (with `filterset`) | `maven-resources-plugin` | Bound to `process-resources` and `process-test-resources`. Filtering enabled per resource directory. |
+| `delete`, `mkdir` | `maven-clean-plugin` | Usually deleted, not converted: `target/` is created and wiped by the lifecycle's conventions, not by explicit tasks. |
+| `junit` | `maven-surefire-plugin` | Bound to `test`. Runs everything matching `*Test` naming conventions; reports under `target/surefire-reports/`. |
+| `javadoc` | `maven-javadoc-plugin` | Run on demand (`mvn javadoc:javadoc`) or bound to the `verify`/`package` phase for release builds. |
+| `zip`, `tar` | `maven-assembly-plugin` | Bound to `package` with a descriptor. Replaces distribution-archive targets. |
+| fat jar (one-jar style merges) | `maven-shade-plugin` | Bound to `package`. Replaces the unpack-everything-into-one-jar target. |
+| everything else | `maven-antrun-plugin` | The escape hatch: embed any Ant task in the lifecycle. Covered fully in Chapter 7. |
+
+Two rows deserve emphasis before the examples. First, `delete` and `mkdir`: in Ant these exist because the build must create and reset its own scratch directories. Maven's standard layout removes the need — `target/` is created on demand and wiped by `mvn clean` — so the correct migration for a `clean` target that deletes `build/` and `dist/` is deletion of the target itself, not a `maven-clean-plugin` configuration. If a `delete` target removes something other than build output (a scratch file, a downloaded artifact), that is a different conversation, and Chapter 7 covers how to keep it. Second, `junit`: Ant's `<junit>` block with its `<batchtest>` is replaced not just by the surefire plugin but by its conventions — test classes named `*Test`, `Test*`, or `*Tests` in `src/test/java` are discovered automatically. Chapter 6 covers the details, including `@RunWith`/`@Nested` edge cases and nonstandard names.
+
+### Compiling: `javac` vs `maven-compiler-plugin`
+
+The Ant side, from the baseline POM chapter:
+
+```xml
+<target name="compile">
+  <javac srcdir="${src.dir}" destdir="${build.dir}/classes"
+         source="1.8" target="1.8" encoding="UTF-8" debug="on"/>
+</target>
+```
+
+The Maven side. Note that acme-core's baseline POM already covers this target: the `maven.compiler.source`/`maven.compiler.target` and `project.build.sourceEncoding` properties configure the compiler plugin, and `debug` is on by default. Configuration in the POM is only needed for what the properties cannot express — here, the `com/acme/legacy/**` exclude deferred from Chapter 2:
+
+```xml
+<build>
+  <plugins>
+    <plugin>
+      <groupId>org.apache.maven.plugins</groupId>
+      <artifactId>maven-compiler-plugin</artifactId>
+      <configuration>
+        <excludes>
+          <exclude>com/acme/legacy/**</exclude>
+        </excludes>
+      </configuration>
+    </plugin>
+  </plugins>
+</build>
+```
+
+Keep compiler settings in properties wherever possible. Plugin configuration for source/target/encoding is redundant with the properties and tends to drift from them; a future reader cannot tell which one wins without knowing Maven's precedence rules. Reserve compiler-plugin configuration for includes, excludes, annotation processor settings, and things properties genuinely cannot do.
+
+### Packaging the jar: `jar` vs `maven-jar-plugin`
+
+A typical Ant `jar` target with a manifest:
+
+```xml
+<target name="jar" depends="compile">
+  <mkdir dir="dist"/>
+  <jar destfile="dist/acme-core-1.0.0.jar" basedir="${build.dir}/classes">
+    <manifest>
+      <attribute name="Main-Class" value="com.acme.Core"/>
+      <attribute name="Implementation-Version" value="1.0.0"/>
+    </manifest>
+  </jar>
+</target>
+```
+
+The equivalent `maven-jar-plugin` configuration. The `archive` element replaces the nested `<manifest>`, and `addDefaultImplementationEntries` pulls `Implementation-Version` from the POM coordinates rather than a hard-coded value. Note there is no `destfile` and no `basedir`: the jar is always `target/<finalName>.jar`, built from `target/classes/`, because those locations are lifecycle conventions:
+
+```xml
+<build>
+  <plugins>
+    <plugin>
+      <groupId>org.apache.maven.plugins</groupId>
+      <artifactId>maven-jar-plugin</artifactId>
+      <configuration>
+        <archive>
+          <manifest>
+            <mainClass>com.acme.Core</mainClass>
+            <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+          </manifest>
+        </archive>
+      </configuration>
+    </plugin>
+  </plugins>
+</build>
+```
+
+Two things to check when translating a `jar` target: whether it used `includes`/`excludes` to split classes across multiple jars (Maven strongly prefers one artifact per module — split with a multi-module build per Chapter 8 rather than per-jar filters), and whether it jars anything other than compiled classes. A jar that bundles `lib/*.jar` inside it is not a plain jar — that is a shaded jar, covered below.
+
+### Resources: `copy` with `filterset` vs `maven-resources-plugin` filtering
+
+The Ant pattern — copy a properties file and substitute tokens while copying:
+
+```xml
+<target name="resources" depends="init">
+  <copy todir="${build.dir}/classes" filtering="true">
+    <fileset dir="config"/>
+    <filterset>
+      <filter token="project.version" value="1.0.0"/>
+      <filter token="build.timestamp" value="${TODAY}"/>
+    </filterset>
+  </copy>
+</target>
+```
+
+The Maven equivalent: resources in `src/main/resources` are copied and (with filtering on) token-substituted by `maven-resources-plugin` automatically — no configuration beyond switching filtering on. Maven's filter tokens use `@token@` by default rather than Ant's `@token` with a `filterset` (a deliberate difference that avoids collisions with Spring's `${}` placeholders):
+
+```xml
+<build>
+  <resources>
+    <resource>
+      <directory>src/main/resources</directory>
+      <filtering>true</filtering>
+    </resource>
+  </resources>
+</build>
+```
+
+With filtering enabled, a resource like `application.properties` that contained Ant-style tokens is rewritten to use the `@token@` form, and the tokens resolve from the POM itself:
+
+```properties
+app.name=@project.artifactId@
+app.version=@project.version@
+build.jdk=@java.version@
+```
+
+After the migration, `app.version` resolves to `1.0.0-SNAPSHOT` from the POM, with no per-release filter file to update. A caution that applies to the whole row: filtering is a per-resource-directory switch, and enabling it on a directory holding binary files (images, keystores) corrupts them. If `src/main/resources` mixes both, split binaries into a second `<resource>` entry with `filtering` left off. Also prefer `@project.version@` over Ant-style timestamp filters — a timestamp in a resource makes every build's output differ byte-for-byte, which breaks reproducible builds and bloats artifact repositories. If a filter value genuinely has no POM equivalent, define it as a `<property>` and reference it the same way.
+
+### Distribution archives: `zip` vs `maven-assembly-plugin`
+
+The Ant distribution target — jar, docs, and scripts zipped together:
+
+```xml
+<target name="dist" depends="jar">
+  <mkdir dir="dist"/>
+  <zip destfile="dist/acme-core-1.0.0-distribution.zip">
+    <zipfileset dir="dist" includes="acme-core-1.0.0.jar"/>
+    <zipfileset dir="docs" prefix="docs"/>
+    <zipfileset dir="scripts" prefix="bin" filemode="755"/>
+  </zip>
+</target>
+```
+
+The Maven equivalent is `maven-assembly-plugin` with a descriptor, bound to the `package` phase. For the common case of "the jar plus its dependencies, runnable," the built-in `jar-with-dependencies` descriptor needs no descriptor file at all:
+
+```xml
+<build>
+  <plugins>
+    <plugin>
+      <groupId>org.apache.maven.plugins</groupId>
+      <artifactId>maven-assembly-plugin</artifactId>
+      <configuration>
+        <descriptorRefs>
+          <descriptorRef>jar-with-dependencies</descriptorRef>
+        </descriptorRefs>
+        <archive>
+          <manifest>
+            <mainClass>com.acme.Core</mainClass>
+          </manifest>
+        </archive>
+      </configuration>
+      <executions>
+        <execution>
+          <id>make-assembly</id>
+          <phase>package</phase>
+          <goals>
+            <goal>single</goal>
+          </goals>
+        </execution>
+      </executions>
+    </plugin>
+  </plugins>
+</build>
+```
+
+This produces `target/acme-core-1.0.0-SNAPSHOT-jar-with-dependencies.jar` during `mvn package`, with no separate target to remember to run. If the archive genuinely bundles non-jar content like `docs/` and executable scripts (with their permissions), write a custom assembly descriptor (`src/assembly/distribution.xml`) that mirrors the `zipfileset` layout — the `<fileSets>` element with `<directoryMode>` and `<fileMode>` is the direct translation. The full descriptor format is in the plugin's documentation; the principle for this guide is that assembly descriptors live in the project under `src/assembly/`, are versioned with the code, and are reproducible on every machine — which a `zip` target that walks whatever happens to be in `dist/` at the time is not.
+
+### Fat jars: one-jar-style merges vs `maven-shade-plugin`
+
+Some Ant builds do not zip the dependencies alongside the jar; they merge them *into* it — unpacking every jar in `lib/` into one directory and jarring the result, so the application is a single classpath-free file:
+
+```xml
+<target name="onejar" depends="jar,resolve-libs">
+  <mkdir dir="${build.dir}/onejar"/>
+  <unzip dest="${build.dir}/onejar">
+    <fileset dir="lib" includes="*.jar"/>
+  </unzip>
+  <copy todir="${build.dir}/onejar" overwrite="true">
+    <fileset dir="${build.dir}/classes"/>
+  </copy>
+  <jar destfile="dist/acme-core-1.0.0-onejar.jar" basedir="${build.dir}/onejar"/>
+</target>
+```
+
+This target has a subtle, well-known bug: when two dependency jars both contain, say, `META-INF/services/org.slf4j.spi.SLF4JServiceProvider` (service loader files) or overlapping `META-INF/LICENSE` entries, the last-unpacked jar wins and the others are silently dropped — a build-order-dependent failure that works on one machine and breaks on another. The `maven-shade-plugin` exists precisely to do this merge correctly, and its transformers handle the conflicts explicitly:
+
+```xml
+<build>
+  <plugins>
+    <plugin>
+      <groupId>org.apache.maven.plugins</groupId>
+      <artifactId>maven-shade-plugin</artifactId>
+      <executions>
+        <execution>
+          <phase>package</phase>
+          <goals>
+            <goal>shade</goal>
+          </goals>
+          <configuration>
+            <transformers>
+              <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+              <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                <mainClass>com.acme.Core</mainClass>
+              </transformer>
+            </transformers>
+          </configuration>
+        </execution>
+      </executions>
+    </plugin>
+  </plugins>
+</build>
+```
+
+`ServicesResourceTransformer` merges `META-INF/services/` files by concatenating their contents instead of overwriting, which fixes the bug the Ant build carried. Migrating to shade also replaces the `lib/`-driven `resolve-libs` dependency: shade works from the POM's `<dependency>` graph (Chapter 4's work), not from whatever jars are present in a directory. Expect the shaded jar to surface dependency problems the Ant build hid — duplicate classes from conflicting versions in the dependency tree become visible with the shade plugin's warnings, and `mvn dependency:tree -Dverbose` from Chapter 4 is the tool for resolving them.
+
+### Generated sources: codegen targets vs `build-helper-maven-plugin`
+
+Many Ant builds generate source code into a scratch directory before compiling — JAXB classes from schemas, parsers from grammars, or in-house code generators. The Ant pattern:
+
+```xml
+<target name="codegen" depends="init">
+  <mkdir dir="build/gen"/>
+  <java classname="com.acme.tools.CodeGen" fork="true">
+    <arg value="-o"/>
+    <arg value="build/gen"/>
+    <arg value="src/main/schema/model.json"/>
+  </java>
+  <!-- the compile target then adds build/gen to its srcdir -->
+</target>
+```
+
+In Maven, generated sources are just another source directory added before the `compile` phase runs. The `build-helper-maven-plugin`'s `add-source` goal registers the directory, and the generator itself runs earlier in the build:
+
+```xml
+<build>
+  <plugins>
+    <plugin>
+      <groupId>org.codehaus.mojo</groupId>
+      <artifactId>build-helper-maven-plugin</artifactId>
+      <executions>
+        <execution>
+          <id>add-generated-sources</id>
+          <phase>generate-sources</phase>
+          <goals>
+            <goal>add-source</goal>
+          </goals>
+          <configuration>
+            <sources>
+              <source>target/generated-sources/acme</source>
+            </sources>
+          </configuration>
+        </execution>
+      </executions>
+    </plugin>
+  </plugins>
+</build>
+```
+
+The directory you register should live under `target/generated-sources/` — IDEs recognize that path as generated and exclude it from refactoring and formatting. Before reaching for a hand-run generator, though, check whether a Maven plugin exists for it: most generators do, and they are the better answer. JAXB has `jaxb2-maven-plugin` and the `maven-jaxb2-plugin`, ANTLR has `antlr4-maven-plugin`, and both bind their generation goal to the `generate-sources` phase and register their output directory automatically — no `build-helper-maven-plugin` needed. The `add-source` approach above is the tool for in-house generators, invoked via `maven-antrun-plugin` or `exec-maven-plugin` bound to `generate-sources` before the `add-source` execution. The order matters: the generation must run before the sources are registered and compiled, which the `generate-sources` phase guarantees.
+
+### Phase 3 checklist
+
+- [ ] Every target in the Chapter 2 inventory mapped to a row in the table above (or flagged for Chapter 7's Antrun escape hatch)
+- [ ] Compiler settings left in properties; compiler-plugin configuration only for includes/excludes and processors
+- [ ] `maven-jar-plugin` manifest (if any) translated, with versions pulled from coordinates rather than hard-coded
+- [ ] Filtered resources switched to `@token@` form; binaries excluded from filtering
+- [ ] Distribution `zip`/`tar` targets replaced with assembly descriptors (or removed if the jar suffices)
+- [ ] Fat-jar merges replaced with `maven-shade-plugin` including `ServicesResourceTransformer`
+- [ ] Generated-source directories registered via `build-helper-maven-plugin` (or a dedicated generator plugin) under `target/generated-sources/`
+- [ ] `mvn clean package` produces the same artifact(s) the Ant build did, byte-comparable in content if not in name
 
 ## 6. Phase 4: Migrate Tests
 
