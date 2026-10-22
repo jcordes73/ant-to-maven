@@ -1503,7 +1503,7 @@ The Maven equivalent — two profiles, with `dev` active by default:
 </project>
 ```
 
-Now `mvn package` builds the dev configuration — no forgotten `-Denv=` — and `mvn -P prod package` builds the production one. `mvn help:active-profiles` shows which profiles are active in a given invocation, which is the closest thing to Ant's "print all the properties" debugging target. One caveat on `activeByDefault`: it only holds while no other profile in the same POM is activated explicitly — activating `prod` silently deactivates `dev`, which is usually what you want, but it means `activeByDefault` is not a guarantee, only a default.
+Now `mvn package` builds the dev configuration — no forgotten `-Denv=` — and `mvn -P prod package` builds the production one. `mvn help:active-profiles` shows which profiles are active in a given invocation, which is the closest thing to Ant's "print all the properties" debugging target. One caveat on `activeByDefault`: it only holds while no other profile in the same POM is activated in any way — activating `prod` (via `-P`, a property, or a file trigger) silently deactivates `dev`, which is usually what you want, but it means `activeByDefault` is not a guarantee, only a default.
 
 ### Environment-specific builds via resource filtering
 
@@ -1546,7 +1546,7 @@ app.version=@project.version@
 db.url=@db.url@
 ```
 
-resolves `app.version` from the POM (no filter file needed for it — that token is a built-in) and `db.url` from the environment's filter file. All the cautions from Chapter 5 apply unchanged: prefer `@token@` delimiters so `${...}` placeholders that a framework needs at runtime survive filtering, keep binary files out of filtered directories, and avoid timestamp tokens that make every build's output differ.
+resolves `app.version` from the POM (no filter file needed for it — that token is a built-in) and `db.url` from the environment's filter file, whose values take precedence for token substitution. That is the distinction between the two mechanisms: profile properties like `<db.url>` are fixed in the POM and visible at build time, while the filter file externalizes the token values so they can change per environment without touching the POM. All the cautions from Chapter 5 apply unchanged: write tokens as `@token@`, and restrict the resources plugin to `@`-only delimiters as shown in the Phase 3 chapter so `${...}` placeholders that a framework needs at runtime survive filtering, keep binary files out of filtered directories, and avoid timestamp tokens that make every build's output differ.
 
 Note what disappeared: the per-environment Ant targets (`dist-dev`, `dist-prod`, or whichever spelling the build used) have no Maven equivalent and need none — the artifact is the same, only the filter values differ, and the profile selects those.
 
