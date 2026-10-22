@@ -1643,6 +1643,10 @@ mvn versions:commit
 
 ```xml
 <project>
+  <scm>
+    <connection>scm:git:https://github.com/acme/acme-core.git</connection>
+    <url>https://github.com/acme/acme-core</url>
+  </scm>
   <build>
     <plugins>
       <plugin>
@@ -1665,7 +1669,16 @@ mvn release:prepare
 mvn release:perform
 ```
 
-`prepare` prompts for the release and next-development versions, rewrites the POMs, runs the full build at the release version, and commits the tag; `perform` re-checks out the tag and runs `deploy` from it, which is what makes the published artifact correspond exactly to a commit you can check out later. The plugin requires a clean working tree and push access to the SCM — the same preconditions the Ant release script enforced by convention, now enforced by the tool.
+`prepare` prompts for the release and next-development versions, rewrites the POMs, runs the full build at the release version, and commits the tag; `perform` re-checks out the tag and runs `deploy` from it, which is what makes the published artifact correspond exactly to a commit you can check out later. The plugin requires a clean working tree and push access to the SCM — the same preconditions the Ant release script enforced by convention, now enforced by the tool. It also requires the POM to declare an `<scm>` element (with `connection` and `url`) pointing at the project's version control repository; without one, `release:prepare` fails before doing anything. The URLs below are illustrative — point them at your actual repository:
+
+```xml
+<project>
+  <scm>
+    <connection>scm:git:https://github.com/acme/acme-core.git</connection>
+    <url>https://github.com/acme/acme-core</url>
+  </scm>
+</project>
+```
 
 ### Deploy
 
