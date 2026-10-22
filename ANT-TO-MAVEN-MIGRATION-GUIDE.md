@@ -1425,7 +1425,143 @@ The checklist for this phase:
 
 ## 9. Phase 7: Profiles, Properties, Environments
 
-TODO: content
+Phase 6 moved the shared build properties into the parent POM's `<properties>`. This chapter covers the rest of Ant's property machinery — property files, command-line overrides, and the built-in values you were defining by hand — and the pattern they most often feed: environment-specific builds, selected in Ant by passing `-Denv=dev` or `-Denv=prod` and in Maven by profiles.
+
+### Properties: from Ant property files to the POM
+
+The Ant pattern — properties loaded from an external file:
+
+```xml
+<project name="acme-core" default="dist" basedir=".">
+  <property file="build.properties"/>
+</project>
+```
+
+The Maven equivalent is the `<properties>` section of the POM, which you have already been using since Chapter 8's parent POM for shared compiler and encoding settings:
+
+```xml
+<project>
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <maven.compiler.release>11</maven.compiler.release>
+  </properties>
+</project>
+```
+
+For values that are genuinely machine-local — repository credentials, mirror configuration — Maven has `settings.xml` (in `${user.home}/.m2/settings.xml` or the installation directory), which plays the role of the properties file a developer kept out of version control. Prefer the POM for anything the build itself needs, though: `settings.xml` is per-machine and not versioned with the project, so a build that depends on it is not reproducible from a fresh checkout. Command-line overrides work the same way in both tools: `ant -Dsome.property=value` and `mvn -Dsome.property=value` both define a property for that invocation.
+
+Ant also made you define and wire up properties that Maven provides built in. The `build.dir` and `version` properties in acme-core's `build.xml` are examples — in Maven they already exist:
+
+- `${project.version}` — the project's version (`1.0.0-SNAPSHOT` for acme-core); replaces a hand-maintained `version` property
+- `${project.artifactId}`, `${project.groupId}` — the coordinates
+- `${project.build.directory}` — the build output directory (`target/`); replaces `${build.dir}`
+- `${project.build.outputDirectory}` — compiled classes (`target/classes`); replaces `${build.dir}/classes`
+
+These built-ins are always available in plugin configuration and in filtered resources — Chapter 5 used `@project.version@` in exactly this way. There is nothing to declare and nothing to get out of sync between environments.
+
+### Profiles
+
+A profile is a named slice of the POM — properties, dependencies, plugin configuration, resource filters — that is included in the effective build only when activated. Three activation mechanisms cover what Ant builds typically did with property files and per-environment targets:
+
+- **Explicitly, from the command line:** `mvn -P prod package` activates the profile named `prod`.
+- **By property:** the profile activates automatically when a system property (or an `env`-prefixed environment variable) has a given value.
+- **By file presence:** the profile activates when a named file exists (or is missing) — useful for "developer machine only" configuration.
+
+The Ant pattern — two property files, selected on the command line:
+
+```xml
+<project name="acme-core" default="dist" basedir=".">
+  <property file="${env}.properties"/>
+</project>
+```
+
+with `dev.properties` and `prod.properties` sitting next to `build.xml`, and `ant -Denv=prod` picking which one loads. Forget the `-D` and Ant loads nothing (or, with a default set in the file, quietly builds the wrong environment).
+
+The Maven equivalent — two profiles, with `dev` active by default:
+
+```xml
+<project>
+  <profiles>
+    <profile>
+      <id>dev</id>
+      <activation>
+        <activeByDefault>true</activeByDefault>
+      </activation>
+      <properties>
+        <env>dev</env>
+        <db.url>jdbc:h2:mem:acme</db.url>
+      </properties>
+    </profile>
+    <profile>
+      <id>prod</id>
+      <properties>
+        <env>prod</env>
+        <db.url>jdbc:postgresql://db.acme.example.com:5432/acme</db.url>
+      </properties>
+    </profile>
+  </profiles>
+</project>
+```
+
+Now `mvn package` builds the dev configuration — no forgotten `-Denv=` — and `mvn -P prod package` builds the production one. `mvn help:active-profiles` shows which profiles are active in a given invocation, which is the closest thing to Ant's "print all the properties" debugging target. One caveat on `activeByDefault`: it only holds while no other profile in the same POM is activated explicitly — activating `prod` silently deactivates `dev`, which is usually what you want, but it means `activeByDefault` is not a guarantee, only a default.
+
+### Environment-specific builds via resource filtering
+
+Where Ant builds most often pointed their property files was at a `<filterset>`: the same resources copied for every environment, with different token values per environment. Chapter 5 showed the single-filterset case; with profiles, each environment contributes its own filter file. The Ant pattern, generalized per environment:
+
+```xml
+<target name="resources" depends="init">
+  <copy todir="${build.dir}/classes" filtering="true">
+    <fileset dir="config"/>
+    <filterset>
+      <filter token="db.url" value="${db.url}"/>
+      <filter token="project.version" value="${version}"/>
+    </filterset>
+  </copy>
+</target>
+```
+
+The Maven equivalent — filtering on the resource directory, and the filter file chosen by the profile through the `${env}` property each profile sets:
+
+```xml
+<project>
+  <build>
+    <filters>
+      <filter>src/main/filters/${env}.properties</filter>
+    </filters>
+    <resources>
+      <resource>
+        <directory>src/main/resources</directory>
+        <filtering>true</filtering>
+      </resource>
+    </resources>
+  </build>
+</project>
+```
+
+The profile properties shown above set `<env>dev</env>` or `<env>prod</env>`, so `mvn package` filters with `src/main/filters/dev.properties` and `mvn -P prod package` with `src/main/filters/prod.properties`. A resource like `application.properties` containing:
+
+```properties
+app.version=@project.version@
+db.url=@db.url@
+```
+
+resolves `app.version` from the POM (no filter file needed for it — that token is a built-in) and `db.url` from the environment's filter file. All the cautions from Chapter 5 apply unchanged: prefer `@token@` delimiters so `${...}` placeholders that a framework needs at runtime survive filtering, keep binary files out of filtered directories, and avoid timestamp tokens that make every build's output differ.
+
+Note what disappeared: the per-environment Ant targets (`dist-dev`, `dist-prod`, or whichever spelling the build used) have no Maven equivalent and need none — the artifact is the same, only the filter values differ, and the profile selects those.
+
+### When not to use profiles
+
+Profiles solve build-time variation, and environment configuration is usually not that. The one-build-fits-all-artifact principle says you should build each artifact exactly once and promote that same binary through every environment — which means database URLs, service endpoints, and credentials must not be baked in by a profile at build time. Configuration that varies per deployment belongs outside the artifact entirely: read from the filesystem or environment variables at startup, or injected by the deployment platform. Use profiles for things that genuinely change the build itself — a JDK-restricted build, extra debug output, or the filter-file selection above where the filtered values are only defaults — and keep the deploy-time knobs out of the POM.
+
+### Phase 7 checklist
+
+- [ ] Ant `<property file="...">` values moved to the POM's `<properties>` (or to per-profile properties where they vary)
+- [ ] Hand-defined `version`, `build.dir`, and similar properties replaced by `${project.version}`, `${project.build.directory}`, and the other built-ins
+- [ ] Per-environment property files replaced by profiles, with the everyday environment as `activeByDefault`
+- [ ] Per-environment `<filterset>` values replaced by profile-selected `<filter>` files and resource filtering
+- [ ] `mvn package` and `mvn -P prod package` produce the dev and prod configurations respectively, verified with `mvn help:active-profiles`
+- [ ] Nothing deploy-specific (URLs, credentials, endpoints) is baked into artifacts by a profile; runtime configuration is externalized
 
 ## 10. Phase 8: CI/CD and Release
 
