@@ -337,7 +337,235 @@ The checklist for this phase:
 
 ## 4. Phase 2: Dependencies
 
-TODO: content
+Phase 2 replaces the Ant classpath — the `lib/` directory of hand-collected jars — with Maven's dependency model. This is the phase where the migration starts paying for itself: jars are named by coordinates instead of filenames, transitive dependencies arrive automatically, and version conflicts become visible instead of silently tolerated. The deliverable is a `<dependencies>` section on the acme-core POM from Chapter 3, plus a strategy for the jars Maven cannot fetch on its own.
+
+This chapter consumes the classpath inventory from Chapter 2: every jar on every `<path>` and `<classpath>` element becomes a `<dependency>` entry here.
+
+### From `lib/` jars to managed dependencies
+
+In the Ant build, dependencies are files. The `compile.classpath` path from Chapter 2's excerpt sweeps every jar in `lib/` into the classpath, and the only thing distinguishing a compile-time jar from a test-only one is which paths reference it:
+
+```xml
+<project name="acme-core" default="compile" basedir=".">
+  <property name="lib.dir" value="lib"/>
+
+  <path id="compile.classpath">
+    <fileset dir="${lib.dir}">
+      <include name="*.jar"/>
+    </fileset>
+  </path>
+
+  <path id="test.classpath">
+    <path refid="compile.classpath"/>
+    <fileset dir="${lib.dir}/test">
+      <include name="*.jar"/>
+    </fileset>
+  </path>
+</project>
+```
+
+In Maven, dependencies are coordinates. Each jar becomes a `groupId:artifactId:version` triple plus a scope, and Maven fetches the jar itself from a repository. Translating the classpath inventory, acme-core's `<dependencies>` section lists the same jars by name instead of by filename:
+
+```xml
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.acme</groupId>
+  <artifactId>acme-core</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+  <packaging>jar</packaging>
+
+  <properties>
+    <maven.compiler.source>11</maven.compiler.source>
+    <maven.compiler.target>11</maven.compiler.target>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-lang3</artifactId>
+      <version>3.14.0</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.logging.log4j</groupId>
+      <artifactId>log4j-api</artifactId>
+      <version>2.23.1</version>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.10.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>
+```
+
+Notice what disappeared: the split between `compile.classpath` and `test.classpath` is now expressed by scope rather than by separate path definitions, and nothing in the build refers to a `lib/` directory at all. Delete the `lib/` directory only after the build compiles and tests pass without it — but delete it in the same migration, or it will keep growing.
+
+The scope decides which classpaths a dependency lands on, and it is the direct replacement for the Ant pattern of maintaining separate `<path>` elements per target:
+
+| Scope | Available at compile time | Available at runtime | Typical use |
+| --- | --- | --- | --- |
+| `compile` (default) | yes | yes | libraries the code itself uses, like `commons-lang3` |
+| `provided` | yes | no (expected from the container/JVM) | servlet API in a war, annotation processors, Lombok |
+| `runtime` | no | yes | JDBC drivers, service-loader implementations |
+| `test` | test compile and test runtime only | test runtime only | JUnit, test fixtures, assertion libraries |
+| `system` | yes | no | a jar on the local disk, referenced by absolute path |
+
+When in doubt, omit `<scope>` — the default is `compile`, which is what most jar-in-`lib/` relationships were in the Ant build anyway. Two cautions:
+
+- **`system` scope is deprecated and a last resort.** It points at a jar via an absolute path (`<systemPath>`), which defeats everything the migration is buying you: no transitive resolution, no repository, no reproducibility on other machines. If you reach for it, treat that as a marker that the jar needs a real home (see "Internal jars" below) and fix the underlying problem instead.
+- **A jar used by both main code and tests is `compile`, not `test`.** Scope `test` means the main sources cannot see it, so the compiler will reject imports that the Ant build allowed. This is a common and healthy breakage: it surfaces an accidental test-to-main dependency.
+
+### Transitive resolution
+
+In the Ant build, if `commons-lang3` needed another jar, someone had to know that and drop that jar into `lib/` too. Maven does this for you: when you declare a dependency, Maven also fetches *its* dependencies, recursively, along with the versions those projects declare. This is transitive resolution, and it is the single largest deletion from your dependency inventory — the jars in `lib/` that existed only because some other jar needed them do not get `<dependency>` entries at all.
+
+The command for seeing what actually ended up on your classpath is:
+
+```bash
+mvn dependency:tree
+```
+
+This prints the full resolved graph, your direct dependencies at the top level and everything they pulled in beneath them, with the scope of each node. Two things to do with it during the migration:
+
+- **Compare it against the `lib/` inventory.** Every jar in `lib/` should either appear in the tree or be accounted for (not needed, or replaced by an API that moved into the JDK). A jar in `lib/` that does not appear in the tree was probably dead weight; a jar the code imports that is missing from the tree is a missing `<dependency>`.
+- **Use it to find coordinates.** For a jar whose filename you know but whose coordinates you do not, search Maven Central (https://central.sonatype.com/) by filename — its search indexes artifacts by name, and a SHA-1 hash of the jar file also works if the filename is opaque. The search result gives you the `groupId`, `artifactId`, and available versions to paste into the `<dependency>` entry.
+
+### Version conflicts: what Ant silently tolerated
+
+The `lib/` directory accumulates versions: `commons-lang-2.6.jar` and `commons-lang3-3.14.0.jar` can sit side by side for years, with different code paths picking up whichever one the classloader finds first. Worse, two jars can both bundle (not just depend on) different versions of a third library, and the Ant build never complains — it just behaves differently depending on classpath order, which is exactly the kind of bug that surfaces in production and not in development.
+
+Maven refuses to put two versions of the same artifact on one classpath. When the dependency graph contains two versions of the same `groupId:artifactId`, Maven resolves the conflict with a *nearest-wins* rule: the version closest to the root of the dependency tree (that is, declared directly by your project, or reached through the fewest intermediate dependencies) wins, and the other version is silently omitted. Nearest-wins is deterministic, which makes the build reproducible — but the winner may not be the version you wanted, so verify rather than assume.
+
+To see conflicts as they are resolved, run the tree with the verbose flag:
+
+```bash
+mvn dependency:tree -Dverbose
+```
+
+Omitted versions are marked `omitted for conflict` (nearest-wins picked another version) or `omitted for duplicate` (the same version was reached twice). Any `omitted for conflict` line is a version decision Maven made on your behalf; check each one.
+
+When you want the decision made by you instead of by tree distance, pin the version with `<dependencyManagement>`. This section declares versions without adding dependencies: every module and transitive path that references the artifact is forced to the version you name, and the artifact still has to be declared in `<dependencies>` (usually without a version) to land on the classpath:
+
+```xml
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.acme</groupId>
+  <artifactId>acme-core</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+  <packaging>jar</packaging>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.apache.logging.log4j</groupId>
+        <artifactId>log4j-api</artifactId>
+        <version>2.23.1</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+</project>
+```
+
+For acme-core, where transitive dependencies first appear is when log4j or JUnit pull in their own modules; those arrive at the versions their publishers tested together, which is usually what you want, so start with no `<dependencyManagement>` at all and add pins only where the verbose tree shows a conflict you disagree with.
+
+### Internal jars: the file repository stepping stone
+
+Every migration has jars Maven Central cannot supply: shared company libraries, a vendor jar with no public repository, the custom Ant task jar itself. The Ant build's answer was a shared drive, and a `<copy>` (or `<available>`/`<fail>` check) to fetch from it:
+
+```xml
+<project name="acme-core" default="fetch-libs" basedir=".">
+  <property name="shared.drive" value="//fileserver/acme/libs"/>
+  <property name="lib.dir" value="lib"/>
+
+  <target name="fetch-libs" description="Copy shared jars from the company drive">
+    <mkdir dir="${lib.dir}"/>
+    <copy todir="${lib.dir}" failonerror="true">
+      <fileset dir="${shared.drive}">
+        <include name="acme-shared-2.3.0.jar"/>
+        <include name="acme-ant-tasks-1.1.0.jar"/>
+      </fileset>
+    </copy>
+  </target>
+</project>
+```
+
+The end state is a repository manager — Nexus or Artifactory are the common choices — hosting `com.acme` artifacts, with the POM pointing at it via `<repositories>` in `settings.xml` or the POM, and developers deploying shared jars there with `mvn deploy`. That is infrastructure work, though, and it does not need to block the migration. The stepping stone is a file-based repository checked into the project: a `local-repo/` directory laid out in Maven's repository format (`com/acme/acme-shared/2.3.0/acme-shared-2.3.0.jar` and so on), declared in the POM:
+
+```xml
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.acme</groupId>
+  <artifactId>acme-core</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+  <packaging>jar</packaging>
+
+  <repositories>
+    <repository>
+      <id>acme-local</id>
+      <url>file://${project.basedir}/local-repo</url>
+    </repository>
+  </repositories>
+</project>
+```
+
+With this in place, each internal jar is an ordinary `<dependency>` (`com.acme:acme-shared:2.3.0`) resolved from the checked-in directory, and the `copy`-from-shared-drive target is gone. The layout inside `local-repo/` is just the GAV path convention: `local-repo/com/acme/acme-shared/2.3.0/acme-shared-2.3.0.jar`. Treat the file repo as explicitly temporary: it exists so the POM can be finished before the repository manager is, and migrating `local-repo/` contents into Nexus or Artifactory (which then serves the same `com.acme` group) is the follow-up that closes it out.
+
+### Build flags to properties
+
+A smaller but related conversion: Ant builds pass build behavior in flags (`ant -Dcompile.debug=true`) and read them as properties inside `build.xml`. Maven uses the same mechanism — POM properties, overridable with `-D` on the command line:
+
+```xml
+<project name="acme-core" default="compile" basedir=".">
+  <property name="compile.debug" value="false"/>
+
+  <target name="compile">
+    <javac srcdir="src" destdir="build/classes"
+           source="11" target="11" debug="${compile.debug}"/>
+  </target>
+</project>
+```
+
+```xml
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.acme</groupId>
+  <artifactId>acme-core</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+  <packaging>jar</packaging>
+
+  <properties>
+    <maven.compiler.source>11</maven.compiler.source>
+    <maven.compiler.target>11</maven.compiler.target>
+    <maven.compiler.debug>true</maven.compiler.debug>
+  </properties>
+</project>
+```
+
+The Maven compiler plugin reads `maven.compiler.debug` as a property, so `mvn compile` builds with the default from the POM and `mvn compile -Dmaven.compiler.debug=false` overrides it from the command line — the same convention as `-Dcompile.debug=true`, with the POM supplying the default instead of the script. User-defined properties work the same way: any `<properties>` entry can be overridden with `-D` and referenced as `${name}` in plugin configuration. Chapter 7 revisits this pattern for environment-specific settings, where it becomes the basis for profiles.
+
+### Phase 2 checklist
+
+- [ ] Every jar from the classpath inventory is either a `<dependency>`, resolved transitively, or accounted for as unneeded
+- [ ] Scopes assigned deliberately: `test` for test-only jars, `provided` for container-supplied ones, `compile` for everything in main code
+- [ ] No `system`-scoped dependencies
+- [ ] `mvn dependency:tree` reviewed against the `lib/` inventory; conflicts checked with `-Dverbose`
+- [ ] Internal jars available via a repository (file-based `local-repo/` as the stepping stone, repository manager as the end state)
+- [ ] `lib/` directory deleted and the copy-from-shared-drive target removed
 
 ## 5. Phase 3: Map Build Steps to Plugins
 
